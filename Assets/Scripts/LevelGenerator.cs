@@ -367,13 +367,20 @@ public class LevelGeneratorEditor : Editor
             // Instantiate all planned tiles
             foreach (var tilePlan in plan)
             {
-                // Create the tile without rotation
-                var go = Instantiate(
+                // Create the tile without rotation - use PrefabUtility in editor mode
+                GameObject go;
+#if UNITY_EDITOR
+                go = UnityEditor.PrefabUtility.InstantiatePrefab(tilePlan.prefab, container) as GameObject;
+                go.transform.position = new Vector3(tilePlan.position.x * spacing, 0, tilePlan.position.y * spacing);
+                go.transform.rotation = Quaternion.identity;
+#else
+                go = Instantiate(
                     tilePlan.prefab,
                     new Vector3(tilePlan.position.x * spacing, 0, tilePlan.position.y * spacing),
                     Quaternion.identity,
                     container
                 );
+#endif
                 
                 go.name = $"{tilePlan.prefab.name}_{tilePlan.position.x}_{tilePlan.position.y}";
                 var tile = go.GetComponent<Tile>();
@@ -625,10 +632,17 @@ public class LevelGeneratorEditor : Editor
             Debug.Log($"Start pozisyonu: {startPos}, End pozisyonu: {endPos}");
 
             // Start Tile'ı oluştur
-            var startGo = Instantiate(startPrefab,
+            GameObject startGo;
+#if UNITY_EDITOR
+            startGo = UnityEditor.PrefabUtility.InstantiatePrefab(startPrefab, container) as GameObject;
+            startGo.transform.position = new Vector3(startPos.x * spacing, 0, startPos.y * spacing);
+            startGo.transform.rotation = Quaternion.identity;
+#else
+            startGo = Instantiate(startPrefab,
                 new Vector3(startPos.x * spacing, 0, startPos.y * spacing),
                 Quaternion.identity,
                 container);
+#endif
 
             startGo.name = "StartTile";
             startTile = startGo.GetComponent<Tile>();
@@ -642,10 +656,17 @@ public class LevelGeneratorEditor : Editor
             tiles.Add(startTile);
 
             // End Tile'ı oluştur
-            var endGo = Instantiate(endPrefab,
+            GameObject endGo;
+#if UNITY_EDITOR
+            endGo = UnityEditor.PrefabUtility.InstantiatePrefab(endPrefab, container) as GameObject;
+            endGo.transform.position = new Vector3(endPos.x * spacing, 0, endPos.y * spacing);
+            endGo.transform.rotation = Quaternion.identity;
+#else
+            endGo = Instantiate(endPrefab,
                 new Vector3(endPos.x * spacing, 0, endPos.y * spacing),
                 Quaternion.identity,
                 container);
+#endif
 
             endGo.name = "EndTile";
             endTile = endGo.GetComponent<Tile>();
@@ -1054,10 +1075,18 @@ public class LevelGeneratorEditor : Editor
         
         // Create the dead end tile with calculated rotation
         var rotation = Quaternion.Euler(0f, rotationAngle, 0f);
-        var go = Instantiate(prefab,
+        GameObject go;
+        
+#if UNITY_EDITOR
+        go = UnityEditor.PrefabUtility.InstantiatePrefab(prefab, container) as GameObject;
+        go.transform.position = new Vector3(pos.x * spacing, 0, pos.y * spacing);
+        go.transform.rotation = rotation;
+#else
+        go = Instantiate(prefab,
             new Vector3(pos.x * spacing, 0, pos.y * spacing),
             rotation,
             container);
+#endif
         
         go.name = $"DeadEnd_{pos.x}_{pos.y}";
         var deadEndTile = go.GetComponent<Tile>();
@@ -1265,10 +1294,18 @@ public class LevelGeneratorEditor : Editor
         
         // Create the tile with calculated rotation
         var rotation = Quaternion.Euler(0f, rotationAngle, 0f);
-        var go = Instantiate(prefab,
+        GameObject go;
+        
+#if UNITY_EDITOR
+        go = UnityEditor.PrefabUtility.InstantiatePrefab(prefab, container) as GameObject;
+        go.transform.position = new Vector3(pos.x * spacing, 0, pos.y * spacing);
+        go.transform.rotation = rotation;
+#else
+        go = Instantiate(prefab,
             new Vector3(pos.x * spacing, 0, pos.y * spacing),
             rotation,
             container);
+#endif
         
         go.name = $"{prefab.name}_{pos.x}_{pos.y}";
         var tile = go.GetComponent<Tile>();
@@ -1680,11 +1717,18 @@ public class LevelGeneratorEditor : Editor
                 return;
             }
 
-            // Yeni tile oluştur - prefabın rotasyonunu koru
-            var go = Instantiate(prefab,
+            // Yeni tile oluştur - prefab bağlantısını koruyarak
+            GameObject go;
+#if UNITY_EDITOR
+            go = UnityEditor.PrefabUtility.InstantiatePrefab(prefab, container) as GameObject;
+            go.transform.position = new Vector3(pos.x * spacing, 0, pos.y * spacing);
+            go.transform.rotation = prefab.transform.rotation; // Use the prefab's original rotation
+#else
+            go = Instantiate(prefab,
                 new Vector3(pos.x * spacing, 0, pos.y * spacing),
                 prefab.transform.rotation, // Use the prefab's original rotation
                 container);
+#endif
 
             go.name = $"{prefab.name}_{pos.x}_{pos.y}";
             var tile = go.GetComponent<Tile>();

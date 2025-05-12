@@ -11,6 +11,8 @@ using UnityEngine.EventSystems;
 // 3 = Güney (-Z)
 // 4 = Batı  (-X)
 public class Tile : MonoBehaviour, IPointerDownHandler {
+
+    public TileSettingScriptable tileSetting;
     [Header("Açık yönler (1=N(+Z), 2=E(+X), 3=S(-Z), 4=W(-X))")]
     public List<int> openDirections = new List<int>();
     public Transform waterTransform;
@@ -23,8 +25,6 @@ public class Tile : MonoBehaviour, IPointerDownHandler {
     public bool lastState = false;
     public bool hasWater = false;
     public List<MeshRenderer> wallRenderers = new List<MeshRenderer>();
-    public Ease rotateEase = Ease.OutCubic;
-    public float speed = 0.3f;
 
     private void Awake()
     {
@@ -81,6 +81,18 @@ public class Tile : MonoBehaviour, IPointerDownHandler {
         }
     }
 
+    public void WaterAnimation(bool flowing)
+    {
+        if(DOTween.IsTweening(this))
+        {
+            DOTween.Complete(this);
+        }
+        if(flowing)
+        {
+            Debug.Log(waterTransform.GetComponent<MeshRenderer>().material.GetTextureOffset("_MainTex"));
+        }
+    }
+
     public void Rotate90Degrees(Action callback)
     {
         if (DOTween.IsTweening(this))
@@ -89,7 +101,7 @@ public class Tile : MonoBehaviour, IPointerDownHandler {
         }
         transform.DOScale(new Vector3(0.9f, 0.9f, 0.9f), 0.25f).SetLoops(2, LoopType.Yoyo);
         // Objeyi 90 derece döndür (saat yönünde)
-        transform.DORotate(new Vector3(0, 90, 0), 0.5f, RotateMode.LocalAxisAdd).SetEase(rotateEase).SetId(this).OnComplete(() => 
+        transform.DORotate(new Vector3(0, 90, 0), 0.5f, RotateMode.LocalAxisAdd).SetEase(tileSetting.rotateEase).SetId(this).OnComplete(() => 
         {
         //transform.Rotate(0, -90, 0); // Saat yönünde dönüş için -90
 
@@ -116,9 +128,9 @@ public class Tile : MonoBehaviour, IPointerDownHandler {
         hasWater = flowing;
         if(lastState == flowing) return;
         lastState = flowing;
-
+        WaterAnimation(flowing);
         //set walls color to if flowing is false, F691D5, otherwise white
-        waterTransform.DOLocalMoveY(flowing ? 0.4f : 0.2f, 0.8f).SetEase(Ease.OutBounce).SetDelay(delay);
+        waterTransform.DOLocalMoveY(flowing ? 0.4f : 0.2f, tileSetting.waterSpeed).SetEase(tileSetting.waterEase).SetDelay(delay);
         foreach(MeshRenderer wallRenderer in wallRenderers)
         {
             wallRenderer.material.DOColor(flowing ? new Color(1, 1, 1, 0.8f) : new Color(0.96f, 0.57f, 0.83f, 0.8f), 0.3f).SetEase(Ease.InOutSine);

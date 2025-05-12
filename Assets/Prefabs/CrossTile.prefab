@@ -159,6 +159,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 406b4eb971ae34533a00b68124939d02, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  tileSetting: {fileID: 11400000, guid: 45c887bdb1d9f42ea9bf20af559b9ccb, type: 2}
   openDirections: 01000000020000000400000003000000
   waterTransform: {fileID: 5669862607637728648}
   neighbors:

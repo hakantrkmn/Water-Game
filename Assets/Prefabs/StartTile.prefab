@@ -103,7 +103,7 @@ MeshRenderer:
   m_RenderingLayerMask: 1
   m_RendererPriority: 0
   m_Materials:
-  - {fileID: 2100000, guid: 4e0b6ddb752fc4baf887ccc06a5a07c7, type: 2}
+  - {fileID: 2100000, guid: bfe547c21be904003bb7a7aeb621fd1a, type: 2}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0
@@ -158,6 +158,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 406b4eb971ae34533a00b68124939d02, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  tileSetting: {fileID: 11400000, guid: 45c887bdb1d9f42ea9bf20af559b9ccb, type: 2}
   openDirections: 01000000
   waterTransform: {fileID: 3096667345699327426}
   neighbors:
