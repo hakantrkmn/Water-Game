@@ -13,5 +13,5 @@ MonoBehaviour:
   m_Name: TileSetting
   m_EditorClassIdentifier: 
   waterSpeed: 0.6
-  waterEase: 34
+  waterEase: 27
   rotateEase: 27

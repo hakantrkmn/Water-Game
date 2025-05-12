@@ -8,7 +8,6 @@ public class LevelManager : MonoBehaviour
 {
     public static LevelManager Instance { get; private set; }
 
-    public LevelGenerator levelGenerator;
     public Tile startTile;
     public Tile endTile;
     private HashSet<Tile> tilesWithWater = new HashSet<Tile>();
@@ -17,7 +16,7 @@ public class LevelManager : MonoBehaviour
     public float waterFlowDelay = 0.2f; // Delay between each step of water flow
     
     private Coroutine waterFlowCoroutine;
-
+    public bool isLevelCompleted = false;
     private void Awake()
     {
         if (Instance == null)
@@ -138,9 +137,9 @@ public class LevelManager : MonoBehaviour
             // Move to the next wave
             currentWave = nextWave;
         }
-
+        Tile[] allTiles = EventManager.GetAllTiles();
         //setwaterflow to false for tiles that not in tilesWithWater
-        foreach(var tile in levelGenerator.tiles)
+        foreach(var tile in allTiles)
         {
             if(!tilesWithWater.Contains(tile))
             {
@@ -152,6 +151,8 @@ public class LevelManager : MonoBehaviour
         {
             if (endTile.hasWater)
             {
+                isLevelCompleted = true;
+                EventManager.LevelCompleted?.Invoke();
                 Debug.Log("Success! Water reached the end tile!");
                 // Optional: Trigger level completion event
                 // EventManager.LevelCompleted?.Invoke();

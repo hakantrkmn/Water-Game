@@ -92,6 +92,16 @@ public class LevelGeneratorEditor : Editor
 }
 #endif
 
+
+    void OnEnable()
+    {
+        EventManager.GetAllTiles += GetAllTiles;
+    }
+
+    void OnDisable()
+    {
+        EventManager.GetAllTiles -= GetAllTiles;
+    }
     // Helper method to get or create the container
     private Transform GetOrCreateContainer()
     {
@@ -117,6 +127,7 @@ public class LevelGeneratorEditor : Editor
     // This method is for runtime initialization
     void Start()
     {
+        Debug.Log(ES3.Load("level"));
         // Check if we already have a level (child container with tiles)
         if (transform.childCount > 0)
         {

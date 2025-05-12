@@ -26,6 +26,14 @@ public class Tile : MonoBehaviour, IPointerDownHandler {
     public bool hasWater = false;
     public List<MeshRenderer> wallRenderers = new List<MeshRenderer>();
 
+/// <summary>
+/// Start is called on the frame when a script is enabled just before
+/// any of the Update methods is called the first time.
+    /// </summary>
+    void Start()
+    {
+        RotateRandomOnStart();
+    }
     private void Awake()
     {
         meshRenderer = GetComponent<MeshRenderer>();
@@ -93,13 +101,32 @@ public class Tile : MonoBehaviour, IPointerDownHandler {
         }
     }
 
+    public void RotateRandomOnStart()
+    {
+        //rotate random 90 degrees or multiple of 90 degrees
+        int random = UnityEngine.Random.Range(0, 4);
+        for(int i = 0; i < random; i++)
+        {
+        transform.Rotate(0, 90, 0);
+        List<int> newDirections = new List<int>();
+        foreach (int dir in openDirections)
+        {
+            // 1(N)->2(E)->3(S)->4(W)->1(N)
+            int newDir = dir + 1;
+            if (newDir > 4) newDir = 1;
+            newDirections.Add(newDir);
+        }
+        openDirections = newDirections;
+        }
+
+    }
     public void Rotate90Degrees(Action callback)
     {
         if (DOTween.IsTweening(this))
         {
             DOTween.Complete(this);
         }
-        transform.DOScale(new Vector3(0.9f, 0.9f, 0.9f), 0.25f).SetLoops(2, LoopType.Yoyo);
+        transform.DOScale(new Vector3(0.9f, 0.9f, 0.9f), 0.25f).SetLoops(2, LoopType.Yoyo).SetId(this);
         // Objeyi 90 derece döndür (saat yönünde)
         transform.DORotate(new Vector3(0, 90, 0), 0.5f, RotateMode.LocalAxisAdd).SetEase(tileSetting.rotateEase).SetId(this).OnComplete(() => 
         {
