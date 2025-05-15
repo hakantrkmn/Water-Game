@@ -10,12 +10,12 @@ public class SceneLoader : MonoBehaviour
         if(ES3.KeyExists("level"))
         {
             object level = ES3.Load("level");
-            SceneManager.LoadScene(level.ToString());
+            SceneManager.LoadScene("Scene_" + level.ToString());
         }
         else
         {
             ES3.Save("level", 1);
-            SceneManager.LoadScene("1");
+            SceneManager.LoadScene("Scene_1");
         }
     }
     // Update is called once per frame

@@ -47,7 +47,6 @@ GameObject:
   - component: {fileID: 3996943154121650662}
   - component: {fileID: 5030772896361887246}
   - component: {fileID: 97850753661040113}
-  - component: {fileID: -1602577319788329762}
   m_Layer: 0
   m_Name: EndTile
   m_TagString: Untagged
@@ -174,33 +173,7 @@ MonoBehaviour:
   - {fileID: 6369498925050644689}
   - {fileID: 5574883961984978013}
   - {fileID: 8123895332361839295}
---- !u!54 &-1602577319788329762
-Rigidbody:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 964273464618015410}
-  serializedVersion: 5
-  m_Mass: 1
-  m_LinearDamping: 0
-  m_AngularDamping: 0.05
-  m_CenterOfMass: {x: 0, y: 0, z: 0}
-  m_InertiaTensor: {x: 1, y: 1, z: 1}
-  m_InertiaRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_IncludeLayers:
-    serializedVersion: 2
-    m_Bits: 0
-  m_ExcludeLayers:
-    serializedVersion: 2
-    m_Bits: 0
-  m_ImplicitCom: 1
-  m_ImplicitTensor: 1
-  m_UseGravity: 1
-  m_IsKinematic: 1
-  m_Interpolate: 0
-  m_Constraints: 0
-  m_CollisionDetection: 0
+  tileAnimationController: {fileID: 0}
 --- !u!1001 &4985832316114432451
 PrefabInstance:
   m_ObjectHideFlags: 0

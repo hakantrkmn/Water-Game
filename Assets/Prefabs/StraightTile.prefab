@@ -46,7 +46,7 @@ GameObject:
   - component: {fileID: 6346629882386932559}
   - component: {fileID: 2508832685558905213}
   - component: {fileID: 4172414679288118883}
-  - component: {fileID: -5178357184305524544}
+  - component: {fileID: 4035323372804814681}
   m_Layer: 0
   m_Name: StraightTile
   m_TagString: Untagged
@@ -172,33 +172,40 @@ MonoBehaviour:
   wallRenderers:
   - {fileID: 118644274964661422}
   - {fileID: 482931237122237705}
---- !u!54 &-5178357184305524544
-Rigidbody:
+  tileAnimationController: {fileID: 0}
+--- !u!114 &4035323372804814681
+MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 7744763943190611249}
-  serializedVersion: 5
-  m_Mass: 1
-  m_LinearDamping: 0
-  m_AngularDamping: 0.05
-  m_CenterOfMass: {x: 0, y: 0, z: 0}
-  m_InertiaTensor: {x: 1, y: 1, z: 1}
-  m_InertiaRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_IncludeLayers:
-    serializedVersion: 2
-    m_Bits: 0
-  m_ExcludeLayers:
-    serializedVersion: 2
-    m_Bits: 0
-  m_ImplicitCom: 1
-  m_ImplicitTensor: 1
-  m_UseGravity: 1
-  m_IsKinematic: 1
-  m_Interpolate: 0
-  m_Constraints: 0
-  m_CollisionDetection: 0
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 45b9289da0bb145cab23542166f9ee6c, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  animators:
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
+  meshRenderers:
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
+  waterAnimationNames:
+  - Floor
+  - Snake
+  - HipHop
+  - Victory
+  idleAnimationNames:
+  - Angry
+  - Bored
+  - Dizzy
+  - Praying
+  - Sad
 --- !u!1001 &10112344440110731
 PrefabInstance:
   m_ObjectHideFlags: 0

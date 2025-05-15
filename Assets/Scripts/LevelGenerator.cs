@@ -26,21 +26,33 @@ public class LevelGenerator : MonoBehaviour
     public GameObject startPrefab;
     public GameObject endPrefab;
 
+    [Header("Critical Path Settings")]
+    [Tooltip("Material to highlight tiles on the critical path")]
+    public Material criticalPathMaterial;
+    [Tooltip("Material to highlight key tiles that must be correctly positioned")]
+    public Material keyTileMaterial;
+
     private Tile[,] grid;
     public List<Tile> tiles = new List<Tile>();
     private Transform container;
     private Vector2Int startPos;
     private Vector2Int endPos;
     
-    // Kalıcı start ve end tile referansları
+    // Permanent start and end tile references
     private Tile startTile;
     private Tile endTile;
     
-    // Zorluk seviyesine göre ayarlanabilir değerler
+    // Difficulty-based adjustable values
     private float deadEndProbability;
     private float misleadingPathProbability;
     private int maxPathLength;
     private float complexityFactor;
+    
+    // Critical path tracking
+    private List<Vector2Int> criticalPath;
+    private List<Vector2Int> keyTilePositions;
+    private int minValidPathsRequired = 1;
+    private int maxValidPathsAllowed = 10;
 
 #if UNITY_EDITOR
 [CustomEditor(typeof(LevelGenerator))]
@@ -212,12 +224,16 @@ public class LevelGeneratorEditor : Editor
         public Vector2Int position;
         public GameObject prefab;
         public List<int> directions;
+        public bool isOnCriticalPath;
+        public bool isKeyTile;
 
         public TilePlan(Vector2Int pos, GameObject prefab, List<int> dirs)
         {
             this.position = pos;
             this.prefab = prefab;
             this.directions = new List<int>(dirs);
+            this.isOnCriticalPath = false;
+            this.isKeyTile = false;
         }
     }
 
@@ -269,34 +285,23 @@ public class LevelGeneratorEditor : Editor
     {
         try
         {
-            Debug.Log("Level planlaması başlıyor...");
-            
-            // Initialize the grid for planning
+            Debug.Log("Starting level planning...");
             grid = new Tile[height, width];
-            
-            // Clear the tiles list
             tiles.Clear();
-            
-            // Start ve End pozisyonlarını belirle
-            startPos = new Vector2Int(
-                Mathf.Clamp(width / 4, 1, width - 2),
-                Mathf.Clamp(1, 1, height / 3)
-            );
 
-            endPos = new Vector2Int(
-                Mathf.Clamp((3 * width) / 4, 2, width - 2),
-                Mathf.Clamp(height - 2, height * 2/3, height - 2)
-            );
+            // Use GenerateStartEndPositions for start and end
+            var positions = GenerateStartEndPositions();
+            startPos = positions[0];
+            endPos = positions[1];
 
-            // Pozisyonların çakışmadığından emin ol
-            if (Vector2Int.Distance(startPos, endPos) < 3)
+            // Ensure positions are valid
+            if (!InBounds(startPos) || !InBounds(endPos))
             {
-                Debug.LogWarning("Start ve End pozisyonları çok yakın! Ayarlanıyor...");
-                endPos.x = Mathf.Clamp(startPos.x + 3, 0, width - 1);
-                endPos.y = Mathf.Clamp(startPos.y + 3, 0, height - 1);
+                Debug.LogError("Invalid start or end position!");
+                return null;
             }
 
-            Debug.Log($"Start pozisyonu: {startPos}, End pozisyonu: {endPos}");
+            Debug.Log($"Start position: {startPos}, End position: {endPos}");
             
             // Create the plan list and add start/end tiles
             List<TilePlan> plan = new List<TilePlan>();
@@ -310,31 +315,61 @@ public class LevelGeneratorEditor : Editor
             planningGrid[startPos] = new List<int>();
             planningGrid[endPos] = new List<int>();
 
-            // 4. Ana yolu oluştur
+            // Build the main path
             var mainPath = BuildPath(startPos, endPos);
             if (mainPath == null || mainPath.Count < 2)
             {
-                Debug.LogError("Ana yol oluşturulamadı!");
+                Debug.LogError("Failed to create main path!");
                 return null;
             }
             
-            // Yanıltıcı ve çıkmaz yollar oluştur (zorluk seviyesine göre)
+            // Store the main path as the critical path
+            criticalPath = new List<Vector2Int>(mainPath);
+            
+            // Identify key tile positions - these are critical junctions
+            keyTilePositions = new List<Vector2Int>();
+            IdentifyKeyTiles(mainPath, keyTilePositions);
+            
+            // Create deceptive and dead-end paths based on difficulty
             var allPaths = new List<List<Vector2Int>> { mainPath };
             GenerateDeceptivePaths(allPaths, mainPath);
 
-            // 5. Plan all paths
+            // Plan all paths
             PlanPaths(allPaths, planningGrid);
 
-            // 6. Plan dead ends
+            // Plan dead ends at higher difficulties
             if (difficultyRating > 3)
             {
                 PlanDeadEnds(planningGrid);
             }
 
-            // 7. Plan remaining tiles
+            // Create gaps in the critical path for key tiles (at higher difficulties)
+            if (difficultyRating > 3 && keyTilePositions.Count > 0)
+            {
+                CreateGapsForKeyTiles(planningGrid, keyTilePositions);
+            }
+
+            // Plan remaining tiles
             PlanRemainingTiles(planningGrid);
             
-            // 8. Convert planning grid to tile plans
+            // Validate the level difficulty
+            bool isValidDifficulty = ValidateLevelDifficulty(planningGrid);
+            int attempts = 0;
+            
+            // If the level is too easy or too hard, try to adjust it
+            while (!isValidDifficulty && attempts < 3)
+            {
+                attempts++;
+                Debug.Log($"Level difficulty validation failed. Attempt {attempts} to adjust...");
+                
+                // Adjust planning grid based on validation results
+                AdjustLevelDifficulty(planningGrid);
+                
+                // Check if the adjusted level is valid
+                isValidDifficulty = ValidateLevelDifficulty(planningGrid);
+            }
+            
+            // Convert planning grid to tile plans
             foreach (var entry in planningGrid)
             {
                 Vector2Int pos = entry.Key;
@@ -347,273 +382,296 @@ public class LevelGeneratorEditor : Editor
                 // Choose appropriate prefab based on directions
                 GameObject prefab = ChoosePrefab(dirs);
                 
+                // Mark if this is a critical or key tile
+                bool isCriticalTile = criticalPath.Contains(pos);
+                bool isKeyTile = keyTilePositions.Contains(pos);
+                
                 // Add to plan
-                plan.Add(new TilePlan(pos, prefab, dirs));
+                var tilePlan = new TilePlan(pos, prefab, dirs);
+                tilePlan.isOnCriticalPath = isCriticalTile;
+                tilePlan.isKeyTile = isKeyTile;
+                plan.Add(tilePlan);
             }
             
-            Debug.Log($"Level planlaması tamamlandı. {plan.Count} tile planlandı.");
+            Debug.Log($"Level planning completed. {plan.Count} tiles planned.");
             return plan;
         }
         catch (System.Exception e)
         {
-            Debug.LogError($"Level planlama hatası: {e.Message}\n{e.StackTrace}");
+            Debug.LogError($"Level planning error: {e.Message}\n{e.StackTrace}");
             return null;
         }
     }
     
-    // Instantiate the planned level
-    private void InstantiatePlannedLevel(List<TilePlan> plan)
+    private void IdentifyKeyTiles(List<Vector2Int> mainPath, List<Vector2Int> keyTiles)
     {
-        try
+        int keyTileCount = Mathf.RoundToInt(Mathf.Lerp(2, 8, (difficultyRating - 1) / 9f));
+        Debug.Log($"Planning to create {keyTileCount} key tiles");
+
+        if (mainPath.Count <= 2)
+            return;
+
+        HashSet<int> keyIndices = new HashSet<int>();
+        int maxAttempts = keyTileCount * 5;
+
+        while (keyIndices.Count < keyTileCount && maxAttempts > 0)
         {
-            Debug.Log("Planlanan level oluşturuluyor...");
-            
-            // Get or create the container
-            container = GetOrCreateContainer();
-            
-            // Initialize the grid
-            grid = new Tile[height, width];
-            tiles.Clear();
-            
-            // Instantiate all planned tiles
-            foreach (var tilePlan in plan)
-            {
-                // Create the tile without rotation - use PrefabUtility in editor mode
-                GameObject go;
-#if UNITY_EDITOR
-                go = UnityEditor.PrefabUtility.InstantiatePrefab(tilePlan.prefab, container) as GameObject;
-                go.transform.position = new Vector3(tilePlan.position.x * spacing, 0, tilePlan.position.y * spacing);
-                go.transform.rotation = Quaternion.identity;
-#else
-                go = Instantiate(
-                    tilePlan.prefab,
-                    new Vector3(tilePlan.position.x * spacing, 0, tilePlan.position.y * spacing),
-                    Quaternion.identity,
-                    container
-                );
-#endif
-                
-                go.name = $"{tilePlan.prefab.name}_{tilePlan.position.x}_{tilePlan.position.y}";
-                var tile = go.GetComponent<Tile>();
-                
-                if (tile == null)
-                {
-                    Debug.LogError($"Tile component missing on prefab: {tilePlan.prefab.name}");
-                    continue;
-                }
-                
-                // Add to grid and list
-                grid[tilePlan.position.y, tilePlan.position.x] = tile;
-                tiles.Add(tile);
-                
-                // Store references to start and end tiles
-                if (tilePlan.position == startPos)
-                {
-                    startTile = tile;
-                }
-                else if (tilePlan.position == endPos)
-                {
-                    endTile = tile;
-                }
-            }
-            
-            // Assign neighbors
-            AssignNeighbors();
-            
-            // Notify LevelManager about start and end tiles
-            var levelManager = FindObjectOfType<LevelManager>();
-            if (levelManager != null && startTile != null && endTile != null)
-            {
-                levelManager.SetStartAndEndTiles(startTile, endTile);
-                Debug.Log($"Set start tile {startTile.name} and end tile {endTile.name} on LevelManager");
-            }
-            
-            Debug.Log($"Level başarıyla oluşturuldu! {tiles.Count} tile yerleştirildi.");
+            int index = Random.Range(2, mainPath.Count - 2);
+            bool tooClose = keyIndices.Any(existing => Mathf.Abs(existing - index) <= 2);
+            if (!tooClose)
+                keyIndices.Add(index);
+            maxAttempts--;
         }
-        catch (System.Exception e)
+
+        foreach (int index in keyIndices)
         {
-            Debug.LogError($"Level oluşturma hatası: {e.Message}\n{e.StackTrace}");
+            keyTiles.Add(mainPath[index]);
+            Debug.Log($"Added key tile at position {mainPath[index]} (path index: {index})");
         }
     }
-    
-    // Plan paths without instantiating
-    private void PlanPaths(List<List<Vector2Int>> paths, Dictionary<Vector2Int, List<int>> planningGrid)
-    {
-        foreach(var path in paths)
-        {
-            for (int i = 1; i < path.Count - 1; i++)
-            {
-                var prev = path[i - 1];
-                var cur = path[i];
-                var next = path[i + 1];
 
-                // Gather directions for this tile
-                var dirs = GatherDirections(prev, cur, next);
+    // Create gaps in the critical path for key tiles
+    private void CreateGapsForKeyTiles(Dictionary<Vector2Int, List<int>> planningGrid, List<Vector2Int> keyTiles)
+    {
+        // Only applicable at higher difficulties
+        if (difficultyRating < 4 || keyTiles == null || keyTiles.Count == 0)
+            return;
+            
+        // For each key tile, modify its connections to create a gap in the path
+        foreach (var pos in keyTiles)
+        {
+            if (planningGrid.ContainsKey(pos))
+            {
+                // For higher difficulties, we might completely remove the tile
+                // But limit the maximum number of removed tiles based on difficulty
+                int maxRemovedTiles = Mathf.Min(keyTiles.Count - 1, difficultyRating / 2);
+                int currentRemovedTiles = planningGrid.Count(p => keyTiles.Contains(p.Key) && p.Value.Count == 0);
                 
-                // Add to planning grid, merging with existing directions if needed
-                if (planningGrid.ContainsKey(cur))
+                // Only remove if we haven't exceeded our limit and it's not the last key tile
+                if (difficultyRating >= 8 && Random.value < 0.7f && currentRemovedTiles < maxRemovedTiles)
                 {
-                    // Merge directions
-                    foreach (int dir in dirs)
+                    // We'll modify the connections rather than completely removing
+                    planningGrid[pos] = new List<int>(); // Empty list instead of removing
+                    Debug.Log($"Emptied key tile at {pos} to create a gap in the critical path");
+                }
+                // Or we might reduce its connections
+                else if (planningGrid[pos].Count > 2)
+                {
+                    // Reduce to just two directions (making it a straight piece that needs correct rotation)
+                    List<int> originalDirs = new List<int>(planningGrid[pos]);
+                    planningGrid[pos].Clear();
+                    
+                    // Keep just two random directions to force a specific orientation
+                    int dir1Index = Random.Range(0, originalDirs.Count);
+                    int dir1 = originalDirs[dir1Index];
+                    planningGrid[pos].Add(dir1);
+                    
+                    // Try to find a non-opposite direction for the second connection
+                    for (int i = 0; i < originalDirs.Count; i++)
                     {
-                        if (!planningGrid[cur].Contains(dir))
+                        if (i != dir1Index && Mathf.Abs(originalDirs[i] - dir1) != 2)
                         {
-                            planningGrid[cur].Add(dir);
+                            planningGrid[pos].Add(originalDirs[i]);
+                            break;
                         }
                     }
-                }
-                else
-                {
-                    planningGrid[cur] = dirs;
+                    
+                    // If we couldn't find a non-opposite direction, add any other direction
+                    if (planningGrid[pos].Count < 2 && originalDirs.Count > 1)
+                    {
+                        for (int i = 0; i < originalDirs.Count; i++)
+                        {
+                            if (i != dir1Index)
+                            {
+                                planningGrid[pos].Add(originalDirs[i]);
+                                break;
+                            }
+                        }
+                    }
+                    
+                    Debug.Log($"Modified key tile at {pos}: reduced connections from {originalDirs.Count} to {planningGrid[pos].Count}");
                 }
             }
         }
     }
     
-    // Plan dead ends without instantiating
-    private void PlanDeadEnds(Dictionary<Vector2Int, List<int>> planningGrid)
+    // Validate if the level meets the difficulty requirements
+    private bool ValidateLevelDifficulty(Dictionary<Vector2Int, List<int>> planningGrid)
     {
-        Debug.Log("Çıkmaz sokaklar planlanıyor...");
-        
-        int deadEndCount = Mathf.RoundToInt(Mathf.Lerp(2, 15, (difficultyRating - 1) / 9f));
-        int placedDeadEnds = 0;
-        int maxAttempts = deadEndCount * 4;
-        int attempts = 0;
-        
-        while (placedDeadEnds < deadEndCount && attempts < maxAttempts)
+        // Count valid paths
+        int validPathCount = CountValidPaths(startPos, endPos, planningGrid);
+
+        // Calculate critical path metrics
+        int criticalPathLength = criticalPath.Count;
+        int minPathLength = Mathf.RoundToInt(Mathf.Lerp(width + height, (width + height) * 2, (difficultyRating - 1) / 9f));
+        int turns = CalculatePathTurns(criticalPath);
+
+        // Minimum turns scales with difficulty
+        int minTurns = Mathf.RoundToInt(Mathf.Lerp(3, 15, (difficultyRating - 1) / 9f));
+
+        Debug.Log($"Level validation: Paths: {validPathCount} (target: {minValidPathsRequired}-{maxValidPathsAllowed}), " +
+                $"Length: {criticalPathLength} (min: {minPathLength}), Turns: {turns} (min: {minTurns})");
+
+        return validPathCount >= minValidPathsRequired &&
+            validPathCount <= maxValidPathsAllowed &&
+            criticalPathLength >= minPathLength &&
+            turns >= minTurns;
+    }
+    private int CalculatePathTurns(List<Vector2Int> path)
+    {
+        if (path.Count < 3)
+            return 0;
+
+        int turns = 0;
+        for (int i = 1; i < path.Count - 1; i++)
         {
-            attempts++;
+            Vector2Int prevDir = path[i] - path[i - 1];
+            Vector2Int nextDir = path[i + 1] - path[i];
+            if (prevDir != nextDir && prevDir != -nextDir)
+                turns++;
+        }
+        return turns;
+    }
+    // Count possible valid paths from start to end
+    private int CountValidPaths(Vector2Int start, Vector2Int end, Dictionary<Vector2Int, List<int>> planningGrid)
+    {
+        // This is a simplified estimation of path count, not an exact calculation
+        // A real implementation would use a more sophisticated algorithm
+        
+        // Basic breadth-first search to count distinct paths 
+        // Limited to maxValidPathsAllowed+1 to avoid excessive computation
+        
+        int pathCount = 0;
+        HashSet<Vector2Int> visited = new HashSet<Vector2Int>();
+        Queue<Vector2Int> queue = new Queue<Vector2Int>();
+        Dictionary<Vector2Int, int> pathsToNode = new Dictionary<Vector2Int, int>();
+        
+        // Start with the start position
+        queue.Enqueue(start);
+        visited.Add(start);
+        pathsToNode[start] = 1; // 1 path to the start
+        
+        while (queue.Count > 0 && pathCount <= maxValidPathsAllowed + 1)
+        {
+            Vector2Int current = queue.Dequeue();
             
-            // Rastgele bir konum seç
-            int x = Random.Range(1, width - 1);
-            int y = Random.Range(1, height - 1);
-            Vector2Int pos = new Vector2Int(x, y);
+            // Found end, add the number of paths to this node to total
+            if (current == end)
+            {
+                pathCount += pathsToNode[current];
+                continue;
+            }
             
-            // Skip start, end, and unplanned positions
-            if (pos == startPos || pos == endPos || !planningGrid.ContainsKey(pos))
+            // Skip if this node has no connections in the planning grid
+            if (!planningGrid.ContainsKey(current))
                 continue;
                 
-            // Check if we can add a dead end
-            List<int> directions = planningGrid[pos];
-            bool canAddDeadEnd = directions.Count >= 3;
+            // Get the connections from this node
+            List<int> directions = planningGrid[current];
             
-            if (difficultyRating > 6 && directions.Count >= 2)
-                canAddDeadEnd = true;
-                
-            if (canAddDeadEnd)
+            // Check each direction
+            foreach (int dir in directions)
             {
-                // Choose a random direction
-                int randomDirIndex = Random.Range(0, directions.Count);
-                int deadEndDir = directions[randomDirIndex];
+                Vector2Int neighbor = GetNeighborPosition(current, dir);
                 
-                // Calculate neighbor position
-                Vector2Int neighborPos = GetNeighborPosition(pos, deadEndDir);
+                // Skip if out of bounds
+                if (!InBounds(neighbor)) 
+                    continue;
+                    
+                // Skip if the neighbor has no connections or doesn't connect back
+                if (!planningGrid.ContainsKey(neighbor))
+                    continue;
+                    
+                // Check if the neighbor connects back to this node
+                int oppositeDir = GetOppositeDirection(dir);
+                if (!planningGrid[neighbor].Contains(oppositeDir))
+                    continue;
                 
-                // Check if neighbor is valid and unplanned
-                if (InBounds(neighborPos) && !planningGrid.ContainsKey(neighborPos))
+                // If not visited, add to queue
+                if (!visited.Contains(neighbor))
                 {
-                    // Add dead end to planning grid
-                    int oppositeDir = GetOppositeDirection(deadEndDir);
-                    planningGrid[neighborPos] = new List<int> { oppositeDir };
-                    placedDeadEnds++;
+                    visited.Add(neighbor);
+                    queue.Enqueue(neighbor);
+                    pathsToNode[neighbor] = pathsToNode[current];
+                }
+                // If already visited, add to its path count
+                else if (neighbor != end)
+                {
+                    pathsToNode[neighbor] += pathsToNode[current];
                 }
             }
         }
         
-        Debug.Log($"Toplam {placedDeadEnds} çıkmaz sokak planlandı.");
+        return Mathf.Min(pathCount, maxValidPathsAllowed + 1);
     }
     
-    // Plan remaining tiles without instantiating
-    private void PlanRemainingTiles(Dictionary<Vector2Int, List<int>> planningGrid)
+    // Adjust the level difficulty if validation fails
+    private void AdjustLevelDifficulty(Dictionary<Vector2Int, List<int>> planningGrid)
     {
-        // Zorluk seviyesine göre tile dağılımını ayarla
-        float emptyChance = Mathf.Lerp(0.4f, 0.1f, (difficultyRating - 1) / 9f);
-        float straightChance = Mathf.Lerp(0.3f, 0.3f, (difficultyRating - 1) / 9f);
-        float cornerChance = Mathf.Lerp(0.2f, 0.4f, (difficultyRating - 1) / 9f);
-        float tChance = Mathf.Lerp(0.1f, 0.18f, (difficultyRating - 1) / 9f);
-        float crossChance = Mathf.Lerp(0.0f, 0.02f, (difficultyRating - 1) / 9f);
-        
-        for (int y = 0; y < height; y++)
-        {
-            for (int x = 0; x < width; x++)
-            {
-                var pos = new Vector2Int(x, y);
-                
-                // Skip already planned positions
-                if (planningGrid.ContainsKey(pos))
-                    continue;
+        int validPathCount = CountValidPaths(startPos, endPos, planningGrid);
+        int criticalPathLength = criticalPath.Count;
+        int minPathLength = Mathf.RoundToInt(Mathf.Lerp(width + height, (width + height) * 2, (difficultyRating - 1) / 9f));
 
-                float r = Random.value;
-                List<int> dirs = new List<int>();
-                
-                // Determine directions based on random value
-                if (r < emptyChance)
+        if (validPathCount < minValidPathsRequired || criticalPathLength < minPathLength)
+        {
+            Debug.Log("Too few paths or short critical path. Adding connections...");
+            // Extend critical path by adding detours
+            int insertIndex = Random.Range(1, criticalPath.Count - 1);
+            Vector2Int detour = new Vector2Int(
+                Mathf.Clamp(criticalPath[insertIndex].x + Random.Range(-2, 3), 0, width - 1),
+                Mathf.Clamp(criticalPath[insertIndex].y + Random.Range(-2, 3), 0, height - 1)
+            );
+            if (InBounds(detour) && !criticalPath.Contains(detour))
+            {
+                criticalPath.Insert(insertIndex, detour);
+                planningGrid[detour] = new List<int> { 1, 3 }; // Example: straight tile
+            }
+        }
+        else if (validPathCount > maxValidPathsAllowed)
+        {
+            Debug.Log("Too many valid paths. Removing connections...");
+            var nonCriticalTiles = planningGrid.Keys
+                .Where(p => !criticalPath.Contains(p) && p != startPos && p != endPos)
+                .ToList();
+            foreach (var pos in nonCriticalTiles.Take(5))
+            {
+                if (planningGrid[pos].Count > 2)
                 {
-                    // Empty tile - no directions
-                }
-                else if (r < emptyChance + straightChance)
-                {
-                    // Straight tile - random orientation
-                    if (Random.value < 0.5f)
+                    int dirIndex = Random.Range(0, planningGrid[pos].Count);
+                    int dir = planningGrid[pos][dirIndex];
+                    planningGrid[pos].RemoveAt(dirIndex);
+                    Vector2Int neighbor = GetNeighborPosition(pos, dir);
+                    if (planningGrid.ContainsKey(neighbor))
                     {
-                        dirs.Add(1); // North
-                        dirs.Add(3); // South
-                    }
-                    else
-                    {
-                        dirs.Add(2); // East
-                        dirs.Add(4); // West
-                    }
-                }
-                else if (r < emptyChance + straightChance + cornerChance)
-                {
-                    // Corner tile - random orientation
-                    int firstDir = Random.Range(1, 5);
-                    int secondDir;
-                    do {
-                        secondDir = Random.Range(1, 5);
-                    } while (secondDir == firstDir || Mathf.Abs(firstDir - secondDir) == 2);
-                    
-                    dirs.Add(firstDir);
-                    dirs.Add(secondDir);
-                }
-                else if (r < emptyChance + straightChance + cornerChance + tChance)
-                {
-                    // T tile - random orientation
-                    int excludeDir = Random.Range(1, 5);
-                    for (int i = 1; i <= 4; i++)
-                    {
-                        if (i != excludeDir)
-                            dirs.Add(i);
+                        planningGrid[neighbor].Remove(GetOppositeDirection(dir));
                     }
                 }
-                else
-                {
-                    // Cross tile - all directions
-                    dirs.Add(1);
-                    dirs.Add(2);
-                    dirs.Add(3);
-                    dirs.Add(4);
-                }
-                
-                // Add to planning grid
-                planningGrid[pos] = dirs;
             }
         }
     }
-
+        
     private void SetDifficultyParameters()
     {
-        // Zorluk seviyesine göre parametreleri ayarla (1-10 ölçeği)
-        deadEndProbability = Mathf.Lerp(0.05f, 0.6f, (difficultyRating - 1) / 9f);          // Çıkmaz sokak olasılığını arttır
-        misleadingPathProbability = Mathf.Lerp(0.1f, 0.8f, (difficultyRating - 1) / 9f);    // Yanıltıcı yol olasılığını arttır
+        // Scale difficulty parameters based on difficulty rating (1-10 scale)
+        deadEndProbability = Mathf.Lerp(0.05f, 0.7f, (difficultyRating - 1) / 9f);          // Increase dead end probability
+        misleadingPathProbability = Mathf.Lerp(0.1f, 0.8f, (difficultyRating - 1) / 9f);    // Increase deceptive path probability
         maxPathLength = Mathf.RoundToInt(Mathf.Lerp(width + height, (width + height) * 2.5f, (difficultyRating - 1) / 9f));
         complexityFactor = Mathf.Lerp(1f, 3.5f, (difficultyRating - 1) / 9f);
         
-        Debug.Log($"Zorluk parametreleri - Çıkmaz sokak: {deadEndProbability:F2}, " +
-                  $"Yanıltıcı yollar: {misleadingPathProbability:F2}, " +
-                  $"Maksimum yol uzunluğu: {maxPathLength}, " +
-                  $"Karmaşıklık faktörü: {complexityFactor:F2}");
+        // New parameters for improved difficulty scaling
+        int criticalTileCount = Mathf.RoundToInt(Mathf.Lerp(1, 5, (difficultyRating - 1) / 9f));
+        
+        // Set valid path limits based on difficulty
+        minValidPathsRequired = 1; // Always at least one solution
+        maxValidPathsAllowed = Mathf.RoundToInt(Mathf.Lerp(10, 1, (difficultyRating - 1) / 9f));
+        
+        // Debug output
+        Debug.Log($"Difficulty parameters - Dead ends: {deadEndProbability:F2}, " +
+                  $"Deceptive paths: {misleadingPathProbability:F2}, " +
+                  $"Max path length: {maxPathLength}, " +
+                  $"Complexity factor: {complexityFactor:F2}, " +
+                  $"Critical tiles: {criticalTileCount}, " +
+                  $"Max valid paths: {maxValidPathsAllowed}");
     }
 
     private bool CreateStartAndEndTiles()
@@ -744,155 +802,276 @@ public class LevelGeneratorEditor : Editor
         }
     }
 
-    public bool GenerateTiles()
+private bool GenerateSimpleLevel()
+{
+    try
     {
-        try
+        // Clear state
+        if (container != null)
         {
-            Debug.Log("Level oluşturma başlıyor...");
-            
-            // Get or create the container
-            container = GetOrCreateContainer();
-            
-            // Initialize the grid
-            grid = new Tile[height, width];
+            DestroyImmediate(container.gameObject);
+        }
+        container = GetOrCreateContainer();
+        grid = new Tile[height, width];
+        tiles.Clear();
+        criticalPath = null;
+        keyTilePositions = new List<Vector2Int>();
 
-            // Start ve End pozisyonlarını belirle (güvenli bir şekilde)
-            startPos = new Vector2Int(
-                Mathf.Clamp(width / 4, 1, width - 2),
-                Mathf.Clamp(1, 1, height / 3)
-            );
+        // Simple L-shaped path
+        startPos = new Vector2Int(1, 1);
+        endPos = new Vector2Int(width - 2, height - 2);
+        criticalPath = new List<Vector2Int> { startPos };
 
-            endPos = new Vector2Int(
-                Mathf.Clamp((3 * width) / 4, 2, width - 2),
-                Mathf.Clamp(height - 2, height * 2/3, height - 2)
-            );
+        Vector2Int current = startPos;
+        // Move right
+        while (current.x < endPos.x)
+        {
+            current = new Vector2Int(current.x + 1, current.y);
+            criticalPath.Add(current);
+        }
+        // Move up
+        while (current.y < endPos.y)
+        {
+            current = new Vector2Int(current.x, current.y + 1);
+            criticalPath.Add(current);
+        }
 
-            // Pozisyonların çakışmadığından emin ol
-            if (Vector2Int.Distance(startPos, endPos) < 3)
+        // Place critical path tiles
+        for (int i = 0; i < criticalPath.Count; i++)
+        {
+            var pos = criticalPath[i];
+            GameObject prefab;
+            List<int> directions = new List<int>();
+
+            if (pos == startPos)
             {
-                Debug.LogWarning("Start ve End pozisyonları çok yakın! Ayarlanıyor...");
-                endPos.x = Mathf.Clamp(startPos.x + 3, 0, width - 1);
-                endPos.y = Mathf.Clamp(startPos.y + 3, 0, height - 1);
+                prefab = startPrefab;
+                directions = new List<int> { criticalPath[1].x > pos.x ? 2 : 1 }; // East or North
+            }
+            else if (pos == endPos)
+            {
+                prefab = endPrefab;
+                directions = new List<int> { criticalPath[i - 1].x < pos.x ? 4 : 3 }; // West or South
+            }
+            else
+            {
+                bool isCorner = i < criticalPath.Count - 1 && criticalPath[i].x == criticalPath[i + 1].x;
+                prefab = isCorner ? cornerPrefab : straightPrefab;
+                if (isCorner)
+                {
+                    directions = new List<int> { GetDirection(criticalPath[i - 1], pos), GetDirection(pos, criticalPath[i + 1]) };
+                }
+                else
+                {
+                    directions = criticalPath[i].x == criticalPath[i - 1].x ? new List<int> { 1, 3 } : new List<int> { 2, 4 };
+                }
             }
 
-            Debug.Log($"Start pozisyonu: {startPos}, End pozisyonu: {endPos}");
+            PlaceOrientedTile(pos, prefab, directions, false, true);
+        }
 
-            // Add the start and end tiles to the grid
-            if (startTile != null)
+        // Fill remaining tiles with empty tiles
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
             {
-                grid[startPos.y, startPos.x] = startTile;
+                var pos = new Vector2Int(x, y);
+                if (grid[y, x] != null)
+                    continue;
+                PlaceTile(pos, emptyPrefab, new List<int>());
             }
-            
-            if (endTile != null)
-            {
-                grid[endPos.y, endPos.x] = endTile;
-            }
-            
-            // 4. Ana yolu oluştur
-            var mainPath = BuildPath(startPos, endPos);
-            if (mainPath == null || mainPath.Count < 2)
-            {
-                Debug.LogError("Ana yol oluşturulamadı!");
-                return false;
-            }
-            
-            // Yanıltıcı ve çıkmaz yollar oluştur (zorluk seviyesine göre)
-            var allPaths = new List<List<Vector2Int>> { mainPath };
-            GenerateDeceptivePaths(allPaths, mainPath);
+        }
 
-            // 5. Tüm yolları yerleştir
-            PlacePaths(allPaths);
-
-            // 6. Çıkmaz sokaklar ekle
-            if (difficultyRating > 3)
+        AssignNeighbors();
+        if (ValidateLevelSolvability())
+        {
+            if (LevelManager.Instance != null)
             {
-                AddDeadEnds();
+                LevelManager.Instance.SetStartAndEndTiles(grid[startPos.y, startPos.x], grid[endPos.y, endPos.x]);
             }
-
-            // 7. Kalan boşlukları doldur
-            FillRemainingTiles();
-
-            // 8. Komşulukları ata
-            AssignNeighbors();
-
-            Debug.Log("Level başarıyla oluşturuldu!");
-            
-            // Notify LevelManager in both editor and play mode
-            var levelManager = FindObjectOfType<LevelManager>();
-            if (levelManager != null && startTile != null && endTile != null)
-            {
-                levelManager.SetStartAndEndTiles(startTile, endTile);
-            }
-            else if (Application.isPlaying && EventManager.LevelGenerated != null)
-            {
-                EventManager.LevelGenerated.Invoke();
-            }
-            
+            EventManager.LevelGenerated?.Invoke();
+            Debug.Log("Simple level generated successfully");
             return true;
         }
-        catch (System.Exception e)
+        else
         {
-            Debug.LogError($"Level oluşturma hatası: {e.Message}\n{e.StackTrace}");
-            // Temizlik yap
-            if (container != null)
-            {
-                SafeDestroy(container.gameObject);
-                container = null;
-            }
+            Debug.LogError("Simple level is unsolvable");
             return false;
         }
     }
+    catch (System.Exception e)
+    {
+        Debug.LogError($"Simple level generation error: {e.Message}\n{e.StackTrace}");
+        return false;
+    }
+}
+private bool GenerateTiles()
+{
+    int maxAttempts = 5; // Increased attempts for robustness
+    int attempt = 0;
 
+    while (attempt < maxAttempts)
+    {
+        try
+        {
+            Debug.Log($"Generating level, attempt {attempt + 1}");
+            // Clear previous state
+            if (container != null)
+            {
+                DestroyImmediate(container.gameObject);
+            }
+            container = GetOrCreateContainer();
+            grid = new Tile[height, width];
+            tiles.Clear();
+            criticalPath = null;
+            keyTilePositions = new List<Vector2Int>();
+
+            // Set start and end positions
+            startPos = new Vector2Int(width / 4, 1);
+            endPos = new Vector2Int((3 * width) / 4, height - 2);
+
+            if (!InBounds(startPos) || !InBounds(endPos))
+            {
+                Debug.LogError("Invalid start or end position!");
+                return false;
+            }
+
+            if (Vector2Int.Distance(startPos, endPos) < 5) // Increased minimum distance
+            {
+                Debug.LogWarning("Start and end too close, adjusting...");
+                endPos = new Vector2Int((3 * width) / 4, height - 2);
+            }
+
+            // Build critical path
+            var mainPath = BuildPath(startPos, endPos);
+            if (mainPath == null || mainPath.Count < 2)
+            {
+                Debug.LogError("Failed to build main path");
+                attempt++;
+                continue;
+            }
+
+            criticalPath = new List<Vector2Int>(mainPath);
+            var allPaths = new List<List<Vector2Int>> { mainPath };
+            GenerateDeceptivePaths(allPaths, mainPath);
+
+            if (difficultyRating > 3)
+            {
+                IdentifyKeyTiles(mainPath, keyTilePositions);
+            }
+
+            PlacePaths(allPaths);
+            if (difficultyRating > 3)
+                AddDeadEnds();
+            FillRemainingTiles();
+            AssignNeighbors();
+
+            // Validate solvability
+            if (ValidateLevelSolvability())
+            {
+                if (LevelManager.Instance != null)
+                {
+                    LevelManager.Instance.SetStartAndEndTiles(grid[startPos.y, startPos.x], grid[endPos.y, endPos.x]);
+                }
+                EventManager.LevelGenerated?.Invoke();
+                Debug.Log($"Level generated successfully on attempt {attempt + 1}");
+                return true;
+            }
+            else
+            {
+                Debug.LogWarning($"Level unsolvable on attempt {attempt + 1}, retrying...");
+            }
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"Level generation error: {e.Message}\n{e.StackTrace}");
+            attempt++;
+            continue;
+        }
+
+        attempt++;
+    }
+
+    // Fallback: Generate a simple solvable level
+    Debug.LogWarning("Max attempts reached, generating simple level");
+    return GenerateSimpleLevel();
+}  
+
+private int GetDirection(Vector2Int from, Vector2Int to)
+{
+    if (to.y > from.y) return 1; // North
+    if (to.x > from.x) return 2; // East
+    if (to.y < from.y) return 3; // South
+    if (to.x < from.x) return 4; // West
+    Debug.LogWarning($"No valid direction from {from} to {to}, defaulting to North");
+    return 1; // Default fallback
+}
+    
     private void GenerateDeceptivePaths(List<List<Vector2Int>> allPaths, List<Vector2Int> mainPath)
     {
-        // Zorluk seviyesine göre yanıltıcı yol sayısını belirle
-        int deceptivePathCount = Mathf.RoundToInt(Mathf.Lerp(1, 5, (difficultyRating - 1) / 9f));
+        int deceptivePathCount = Mathf.RoundToInt(Mathf.Lerp(2, 10, (difficultyRating - 1) / 9f));
         deceptivePathCount = Mathf.Min(deceptivePathCount, mainPath.Count - 2);
-        
-        Debug.Log($"Yanıltıcı yol sayısı: {deceptivePathCount}");
-        
-        // Ana yoldan başlangıç noktalardan yanıltıcı yollar türet
+
+        Debug.Log($"Creating {deceptivePathCount} deceptive paths");
+
         HashSet<int> usedIndices = new HashSet<int>();
-        
         for (int i = 0; i < deceptivePathCount; i++)
         {
-            // Ana yoldan başlangıç noktası seç (start ve end hariç)
             int startIndex;
-            do {
+            do
+            {
                 startIndex = Random.Range(1, mainPath.Count - 1);
             } while (usedIndices.Contains(startIndex));
-            
+
             usedIndices.Add(startIndex);
             Vector2Int branchStart = mainPath[startIndex];
-            
-            // Yanıltıcı hedef belirle (grid sınırları içinde)
-            Vector2Int fakeTarget = GetRandomFakeTarget(branchStart, mainPath);
-            
-            // Yanıltıcı yol oluştur
+
+            // Create a fake target near the end for higher difficulties
+            Vector2Int fakeTarget;
+            if (difficultyRating > 5 && Random.value < 0.7f)
+            {
+                fakeTarget = new Vector2Int(
+                    Mathf.Clamp(endPos.x + Random.Range(-2, 3), 1, width - 2),
+                    Mathf.Clamp(endPos.y + Random.Range(-2, 3), 1, height - 2)
+                );
+                if (fakeTarget == endPos || Vector2Int.Distance(fakeTarget, endPos) < 2)
+                {
+                    fakeTarget = new Vector2Int(
+                        Mathf.Clamp(endPos.x + (Random.value < 0.5f ? -3 : 3), 1, width - 2),
+                        Mathf.Clamp(endPos.y + (Random.value < 0.5f ? -3 : 3), 1, height - 2)
+                    );
+                }
+            }
+            else
+            {
+                fakeTarget = GetRandomFakeTarget(branchStart, mainPath);
+            }
+
+            // Build a longer deceptive path
             List<Vector2Int> fakePath = BuildDeceptivePath(branchStart, fakeTarget);
-            if (fakePath.Count > 3) // Yeterince uzunsa ekle
+            if (fakePath.Count > 4)
             {
                 allPaths.Add(fakePath);
-                
-                // Zorluk yükseldikçe, bu yoldan başka çıkmaz yollar da oluştur
-                if (difficultyRating > 7 && Random.value < misleadingPathProbability)
+
+                // Add sub-branches for higher difficulties
+                if (difficultyRating > 6 && Random.value < misleadingPathProbability)
                 {
-                    int subBranchIndex = Random.Range(1, fakePath.Count - 1);
-                    Vector2Int subBranchStart = fakePath[subBranchIndex];
-                    Vector2Int subFakeTarget = GetRandomFakeTarget(subBranchStart, fakePath);
-                    
-                    List<Vector2Int> subFakePath = BuildDeceptivePath(subBranchStart, subFakeTarget);
-                    if (subFakePath.Count > 2)
+                    int subBranchCount = Mathf.RoundToInt(Mathf.Lerp(1, 4, (difficultyRating - 1) / 9f));
+                    for (int s = 0; s < subBranchCount && fakePath.Count > 4; s++)
                     {
-                        allPaths.Add(subFakePath);
+                        int subStartIndex = Random.Range(1, fakePath.Count - 2);
+                        Vector2Int subBranchStart = fakePath[subStartIndex];
+                        Vector2Int subFakeTarget = GetRandomFakeTarget(subBranchStart, fakePath);
+                        List<Vector2Int> subFakePath = BuildDeceptivePath(subBranchStart, subFakeTarget);
+                        if (subFakePath.Count > 3)
+                            allPaths.Add(subFakePath);
                     }
                 }
             }
         }
-        
-        Debug.Log($"Toplam oluşturulan yol sayısı: {allPaths.Count}");
+
+        Debug.Log($"Total paths created: {allPaths.Count}");
     }
-    
     private Vector2Int GetRandomFakeTarget(Vector2Int source, List<Vector2Int> avoidPoints)
     {
         // Mevcut yoldan belirli bir uzaklıkta rastgele bir hedef belirle
@@ -919,69 +1098,65 @@ public class LevelGeneratorEditor : Editor
     
     private List<Vector2Int> BuildDeceptivePath(Vector2Int start, Vector2Int target)
     {
-        // Yanıltıcı yollar için path builder
-        float windingFactor = Mathf.Lerp(0.3f, 0.8f, (difficultyRating - 1) / 9f);
-        int minLength = Mathf.RoundToInt(Mathf.Lerp(3, 8, (difficultyRating - 1) / 9f));
-        
+        float windingFactor = Mathf.Lerp(0.3f, 0.95f, (difficultyRating - 1) / 9f);
+        int minLength = Mathf.RoundToInt(Mathf.Lerp(5, 15, (difficultyRating - 1) / 9f));
+        int maxIterations = maxPathLength;
+
         List<Vector2Int> path = new List<Vector2Int> { start };
         Vector2Int current = start;
-        int maxIterations = maxPathLength;
         int iteration = 0;
-        
-        while (current != target && iteration < maxIterations)
+
+        while (iteration < maxIterations)
         {
-            // Doğrudan hedefe gitme olasılığı (zorluk arttıkça azalır)
-            bool directPath = Random.value > windingFactor;
+            bool directPath = Random.value > windingFactor && path.Count > minLength;
             Vector2Int next;
-            
-            if (directPath && path.Count > minLength)
+
+            if (directPath)
             {
-                // Hedefe doğru hareket et
                 Vector2Int dir = new Vector2Int(
                     Mathf.Clamp(target.x - current.x, -1, 1),
                     Mathf.Clamp(target.y - current.y, -1, 1)
                 );
-                
-                // Diagonal hareketi engelle (sadece x veya y)
                 if (dir.x != 0 && dir.y != 0)
-                {
-                    if (Random.value < 0.5f)
-                        dir.x = 0;
-                    else
-                        dir.y = 0;
-                }
-                
+                    dir.y = Random.value < 0.5f ? 0 : dir.y;
                 next = current + dir;
             }
             else
             {
-                // Rastgele bir yönde git (dolambaçlı yol)
-                Vector2Int[] directions = new Vector2Int[] 
+                Vector2Int[] directions = { Vector2Int.up, Vector2Int.right, Vector2Int.down, Vector2Int.left };
+                // Bias toward directions that mimic the critical path
+                if (difficultyRating > 7)
                 {
-                    Vector2Int.up, Vector2Int.right, Vector2Int.down, Vector2Int.left
-                };
-                
-                // Rastgele yön seç
-                Vector2Int dir = directions[Random.Range(0, directions.Length)];
-                next = current + dir;
+                    directions = directions.OrderBy(d =>
+                    {
+                        Vector2Int nextPos = current + d;
+                        float distToEnd = Vector2Int.Distance(nextPos, endPos);
+                        return distToEnd + Random.value * windingFactor;
+                    }).ToArray();
+                }
+                next = current + directions[Random.Range(0, directions.Length)];
             }
-            
-            // Sınırları kontrol et
+
             if (InBounds(next) && !path.Contains(next))
             {
                 path.Add(next);
                 current = next;
+
+                // Stop near the target but don’t connect
+                if (Vector2Int.Distance(current, target) <= 2 && Random.value < 0.8f && difficultyRating > 5)
+                {
+                    Debug.Log($"Deceptive path stopped near target at {current}");
+                    break;
+                }
             }
-            
+            else if (path.Count > minLength && Random.value < 0.3f)
+            {
+                break;
+            }
+
             iteration++;
         }
-        
-        // Hedef noktayı ekle (eğer ulaşılamadıysa)
-        if (current != target && path.Count > 2)
-        {
-            path.Add(target);
-        }
-        
+
         return path;
     }
     
@@ -1091,11 +1266,11 @@ public class LevelGeneratorEditor : Editor
 #if UNITY_EDITOR
         go = UnityEditor.PrefabUtility.InstantiatePrefab(prefab, container) as GameObject;
         go.transform.position = new Vector3(pos.x * spacing, 0, pos.y * spacing);
-        go.transform.rotation = rotation;
+        //go.transform.rotation = rotation;
 #else
         go = Instantiate(prefab,
             new Vector3(pos.x * spacing, 0, pos.y * spacing),
-            rotation,
+            prefab.transform.rotation,
             container);
 #endif
         
@@ -1121,52 +1296,89 @@ public class LevelGeneratorEditor : Editor
         }
     }
     
-    private int GetOppositeDirection(int direction)
+private int GetOppositeDirection(int dir)
+{
+    switch (dir)
     {
-        return direction <= 2 ? direction + 2 : direction - 2;
+        case 1: return 3; // North -> South
+        case 2: return 4; // East -> West
+        case 3: return 1; // South -> North
+        case 4: return 2; // West -> East
+        default: return dir;
     }
+}
 
     private Vector2Int[] GenerateStartEndPositions()
     {
         Vector2Int start, end;
-        float cornerPreference = Mathf.Lerp(0.3f, 0.8f, (difficultyRating - 1) / 9f);
-        
-        // Start pozisyonu (alt kısımda)
-        int startY = Mathf.RoundToInt(height * 0.2f);
-        if (Random.value < cornerPreference)
-        {
-            start = new Vector2Int(
-                Random.value < 0.5f ? Random.Range(0, width / 3) : Random.Range(2 * width / 3, width),
-                Random.Range(0, startY)
-            );
-        }
-        else
-        {
-            start = new Vector2Int(Random.Range(0, width), Random.Range(0, startY));
-        }
-
-        // End pozisyonu (üst kısımda)
-        int endY = Mathf.RoundToInt(height * 0.8f);
-        float minDist = Mathf.Lerp(width * 0.3f, width * 0.8f, (difficultyRating - 1) / 9f);
+        // Minimum distance scales with difficulty (at least 50%-80% of grid diagonal)
+        float minDist = Mathf.Lerp(0.5f, 0.8f, (difficultyRating - 1) / 9f) * Mathf.Sqrt(width * width + height * height);
+        int maxAttempts = 50;
 
         do
         {
-            if (Random.value < cornerPreference)
+            // Divide grid into quadrants to ensure start and end are in different regions
+            int startQuadrant = Random.Range(0, 4);
+            int endQuadrant;
+            do
             {
-                end = new Vector2Int(
-                    Random.value < 0.5f ? Random.Range(0, width / 3) : Random.Range(2 * width / 3, width),
-                    Random.Range(endY, height)
-                );
-            }
-            else
-            {
-                end = new Vector2Int(Random.Range(0, width), Random.Range(endY, height));
-            }
-        } while (Vector2Int.Distance(start, end) < minDist);
+                endQuadrant = Random.Range(0, 4);
+            } while (endQuadrant == startQuadrant);
 
+            // Start position
+            switch (startQuadrant)
+            {
+                case 0: // Top-left
+                    start = new Vector2Int(Random.Range(0, width / 2), Random.Range(height / 2, height));
+                    break;
+                case 1: // Top-right
+                    start = new Vector2Int(Random.Range(width / 2, width), Random.Range(height / 2, height));
+                    break;
+                case 2: // Bottom-left
+                    start = new Vector2Int(Random.Range(0, width / 2), Random.Range(0, height / 2));
+                    break;
+                case 3: // Bottom-right
+                    start = new Vector2Int(Random.Range(width / 2, width), Random.Range(0, height / 2));
+                    break;
+                default:
+                    start = new Vector2Int(Random.Range(0, width), Random.Range(0, height));
+                    break;
+            }
+
+            // End position
+            switch (endQuadrant)
+            {
+                case 0: // Top-left
+                    end = new Vector2Int(Random.Range(0, width / 2), Random.Range(height / 2, height));
+                    break;
+                case 1: // Top-right
+                    end = new Vector2Int(Random.Range(width / 2, width), Random.Range(height / 2, height));
+                    break;
+                case 2: // Bottom-left
+                    end = new Vector2Int(Random.Range(0, width / 2), Random.Range(0, height / 2));
+                    break;
+                case 3: // Bottom-right
+                    end = new Vector2Int(Random.Range(width / 2, width), Random.Range(0, height / 2));
+                    break;
+                default:
+                    end = new Vector2Int(Random.Range(0, width), Random.Range(0, height));
+                    break;
+            }
+
+            maxAttempts--;
+        } while (Vector2Int.Distance(start, end) < minDist && maxAttempts > 0);
+
+        if (maxAttempts <= 0)
+        {
+            Debug.LogWarning("Could not find valid start/end positions with sufficient distance. Using fallback.");
+            start = new Vector2Int(Random.Range(0, width / 2), Random.Range(0, height / 2));
+            end = new Vector2Int(Random.Range(width / 2, width), Random.Range(height / 2, height));
+        }
+
+        Debug.Log($"Start: {start}, End: {end}, Distance: {Vector2Int.Distance(start, end)}");
         return new Vector2Int[] { start, end };
     }
-
+    
     private List<List<Vector2Int>> BuildMultiplePaths(Vector2Int start, Vector2Int end)
     {
         List<List<Vector2Int>> allPaths = new List<List<Vector2Int>>();
@@ -1201,389 +1413,436 @@ public class LevelGeneratorEditor : Editor
 
         return allPaths;
     }
-
-    private void PlacePaths(List<List<Vector2Int>> paths)
+private void PlacePaths(List<List<Vector2Int>> allPaths)
+{
+    foreach (var path in allPaths)
     {
-        HashSet<Vector2Int> usedTiles = new HashSet<Vector2Int>();
-
-        foreach(var path in paths)
+        for (int i = 0; i < path.Count; i++)
         {
-            for (int i = 1; i < path.Count - 1; i++)
+            var pos = path[i];
+            if (pos == startPos || pos == endPos)
+                continue;
+
+            List<int> directions = new List<int>();
+
+            // Determine required directions based on path connections
+            if (i > 0)
             {
                 var prev = path[i - 1];
-                var cur = path[i];
+                if (prev.y < pos.y) directions.Add(1); // North
+                else if (prev.x > pos.x) directions.Add(2); // East
+                else if (prev.y > pos.y) directions.Add(3); // South
+                else if (prev.x < pos.x) directions.Add(4); // West
+            }
+            if (i < path.Count - 1)
+            {
                 var next = path[i + 1];
+                if (next.y > pos.y) directions.Add(1); // North
+                else if (next.x < pos.x) directions.Add(2); // East
+                else if (next.y < pos.y) directions.Add(3); // South
+                else if (next.x > pos.x) directions.Add(4); // West
+            }
 
-                if(!usedTiles.Contains(cur))
-                {
-                    // Gather required directions for this tile
-                    var dirs = GatherDirections(prev, cur, next);
-                    
-                    // Choose appropriate prefab based on directions
-                    var prefab = ChoosePrefab(dirs);
-                    
-                    // Place the tile with appropriate rotation
-                    PlaceOrientedTile(cur, prefab, dirs);
-                    usedTiles.Add(cur);
-                }
-                else
-                {
-                    // Tile already exists, we would need to merge connections
-                    // This is complex to handle with prefab rotations
-                    // For now, we'll skip these tiles to avoid conflicts
-                    Debug.Log($"Skipping tile at {cur} as it's already placed");
-                }
-            }
-        }
-    }
-    
-    // New method to place a tile with appropriate rotation without modifying openDirections
-    private void PlaceOrientedTile(Vector2Int pos, GameObject prefab, List<int> desiredDirections)
-    {
-        if (!InBounds(pos))
-        {
-            Debug.LogError($"Invalid position: {pos}");
-            return;
-        }
-        
-        // Skip start and end positions
-        if (pos == startPos || pos == endPos)
-        {
-            return;
-        }
-        
-        // Calculate rotation based on the desired directions
-        float rotationAngle = 0f;
-        
-        if (prefab == straightPrefab)
-        {
-            // For straight tiles: determine if it's horizontal or vertical
-            bool isVertical = desiredDirections.Contains(1) || desiredDirections.Contains(3);
-            rotationAngle = isVertical ? 0f : 90f;
-        }
-        else if (prefab == cornerPrefab)
-        {
-            // For corner tiles: determine rotation based on which directions are desired
-            if (desiredDirections.Contains(3) && desiredDirections.Contains(4))
+            // Select appropriate prefab based on directions
+            GameObject prefab;
+            if (directions.Count == 2 && Mathf.Abs(directions[0] - directions[1]) == 2)
             {
-                rotationAngle = 0f;  // South-West
+                prefab = straightPrefab; // Straight tile
             }
-            else if (desiredDirections.Contains(3) && desiredDirections.Contains(2))
+            else if (directions.Count == 2)
             {
-                rotationAngle = 90f; // South-East
+                prefab = cornerPrefab; // Corner tile
             }
-            else if (desiredDirections.Contains(1) && desiredDirections.Contains(2))
+            else if (directions.Count == 3)
             {
-                rotationAngle = 180f; // North-East
-            }
-            else if (desiredDirections.Contains(1) && desiredDirections.Contains(4))
-            {
-                rotationAngle = 270f; // North-West
-            }
-        }
-        else if (prefab == tPrefab)
-        {
-            // For T tiles: determine which way the T is facing
-            if (!desiredDirections.Contains(1))
-            {
-                rotationAngle = 0f;   // T facing South (open to E,S,W)
-            }
-            else if (!desiredDirections.Contains(2))
-            {
-                rotationAngle = 90f;  // T facing West (open to N,S,W)
-            }
-            else if (!desiredDirections.Contains(3))
-            {
-                rotationAngle = 180f; // T facing North (open to N,E,W)
-            }
-            else if (!desiredDirections.Contains(4))
-            {
-                rotationAngle = 270f; // T facing East (open to N,E,S)
-            }
-        }
-        // Cross tiles don't need rotation
-        
-        // Create the tile with calculated rotation
-        var rotation = Quaternion.Euler(0f, rotationAngle, 0f);
-        GameObject go;
-        
-#if UNITY_EDITOR
-        go = UnityEditor.PrefabUtility.InstantiatePrefab(prefab, container) as GameObject;
-        go.transform.position = new Vector3(pos.x * spacing, 0, pos.y * spacing);
-        go.transform.rotation = rotation;
-#else
-        go = Instantiate(prefab,
-            new Vector3(pos.x * spacing, 0, pos.y * spacing),
-            rotation,
-            container);
-#endif
-        
-        go.name = $"{prefab.name}_{pos.x}_{pos.y}";
-        var tile = go.GetComponent<Tile>();
-        
-        // IMPORTANT: We don't modify openDirections - they come from the prefab
-        
-        // Add to grid and tiles list
-        grid[pos.y, pos.x] = tile;
-        if (!tiles.Contains(tile))
-        {
-            tiles.Add(tile);
-        }
-    }
-
-    private void FillRemainingTiles()
-    {
-        // Zorluk seviyesine göre tile dağılımını ayarla
-        float emptyChance = Mathf.Lerp(0.4f, 0.1f, (difficultyRating - 1) / 9f);
-        float straightChance = Mathf.Lerp(0.3f, 0.3f, (difficultyRating - 1) / 9f); // Düz tile sabit
-        float cornerChance = Mathf.Lerp(0.2f, 0.4f, (difficultyRating - 1) / 9f);  // Köşe tile'ları arttır
-        float tChance = Mathf.Lerp(0.1f, 0.18f, (difficultyRating - 1) / 9f);      // T-tile'ları biraz azalt
-        float crossChance = Mathf.Lerp(0.0f, 0.02f, (difficultyRating - 1) / 9f);  // Cross tile'ları ciddi şekilde azalt
-        
-        Debug.Log($"Tile dağılımı - Boş: {emptyChance:F2}, Düz: {straightChance:F2}, " +
-                  $"Köşe: {cornerChance:F2}, T: {tChance:F2}, Artı: {crossChance:F2}");
-
-        for (int y = 0; y < height; y++)
-        {
-            for (int x = 0; x < width; x++)
-            {
-                var pos = new Vector2Int(x, y);
-                
-                // Start ve End pozisyonlarını atla
-                if (pos == startPos || pos == endPos || (grid[y, x] != null && grid[y, x].openDirections.Count > 0))
-                    continue;
-
-                float r = Random.value;
-                GameObject selectedPrefab = null;
-                
-                if (r < emptyChance)
-                {
-                    selectedPrefab = emptyPrefab;
-                }
-                else if (r < emptyChance + straightChance)
-                {
-                    selectedPrefab = straightPrefab;
-                }
-                else if (r < emptyChance + straightChance + cornerChance)
-                {
-                    selectedPrefab = cornerPrefab;
-                }
-                else if (r < emptyChance + straightChance + cornerChance + tChance)
-                {
-                    selectedPrefab = tPrefab;
-                }
-                else
-                {
-                    selectedPrefab = crossPrefab;
-                }
-                
-                // Tile yerleştir (openings ayarlamadan)
-                PlaceTile(pos, selectedPrefab, new List<int>());
-            }
-        }
-    }
-
-    List<Vector2Int> BuildPath(Vector2Int start, Vector2Int end)
-    {
-        // Zorluk bazlı parametreler - daha zorlaştırıldı
-        float directPathBias = Mathf.Lerp(0.8f, 0.1f, (difficultyRating - 1) / 9f);  // Kolay: 0.8, Zor: 0.1
-        int minWaypoints = Mathf.RoundToInt(Mathf.Lerp(1, 8, (difficultyRating - 1) / 9f));  // Kolay: 1, Zor: 8
-        int maxWaypoints = Mathf.RoundToInt(Mathf.Lerp(2, 15, (difficultyRating - 1) / 9f));  // Kolay: 2, Zor: 15
-        
-        List<Vector2Int> waypoints = new List<Vector2Int> { start };
-        Vector2Int lastPoint = start;
-        int waypointCount = Random.Range(minWaypoints, maxWaypoints + 1);
-        
-        Debug.Log($"Zorluk: {difficultyRating}, Waypoint Sayısı: {waypointCount}");
-
-        // Zorluğa göre rotayı karmaşıklaştır
-        // Zorluk yükseldikçe daha uzak ve zikzaklı yollar
-        bool forceZigZag = difficultyRating > 6 && Random.value < 0.7f;
-        
-        for (int i = 0; i < waypointCount; i++)
-        {
-            Vector2Int waypoint;
-            bool useDirectPath = Random.value < directPathBias;
-
-            if (useDirectPath && !forceZigZag)
-            {
-                // Hedefe doğru daha direkt bir yol
-                waypoint = new Vector2Int(
-                    Mathf.RoundToInt(Mathf.Lerp(lastPoint.x, end.x, Random.Range(0.3f, 0.7f))),
-                    Mathf.RoundToInt(Mathf.Lerp(lastPoint.y, end.y, Random.Range(0.3f, 0.7f)))
-                );
+                prefab = tPrefab; // T tile
             }
             else
             {
-                // Daha karmaşık yol için uzak noktalar
-                int maxOffset = Mathf.RoundToInt(Mathf.Lerp(width/4, width/2 * complexityFactor, (difficultyRating - 1) / 9f));
-                
-                // Zıtlayan yön (zigzag) kontrolü
-                int xOffset, yOffset;
-                
-                if (forceZigZag && i > 0 && i < waypointCount - 1)
-                {
-                    // Önceki harekete göre ters yönde hareket
-                    bool moveHorizontal = i % 2 == 0;
-                    
-                    if (moveHorizontal)
-                    {
-                        xOffset = Random.Range(maxOffset/2, maxOffset+1) * (Random.value < 0.5f ? 1 : -1);
-                        yOffset = 0;
-                    }
-                    else
-                    {
-                        xOffset = 0;
-                        yOffset = Random.Range(maxOffset/2, maxOffset+1) * (Random.value < 0.5f ? 1 : -1);
-                    }
-                }
-                else
-                {
-                    // Normal rastgele hareket
-                    xOffset = Random.Range(-maxOffset, maxOffset + 1);
-                    yOffset = Random.Range(-maxOffset, maxOffset + 1);
-                }
-                
-                // Zorluğa göre hedefe daha uzak noktalar tercih et
-                if (difficultyRating > 5 && Vector2Int.Distance(lastPoint, end) < width / 2 && i < waypointCount - 2)
-                {
-                    // Hedeften uzaklaşan hareket
-                    Vector2Int dirToEnd = new Vector2Int(
-                        end.x - lastPoint.x > 0 ? 1 : -1,
-                        end.y - lastPoint.y > 0 ? 1 : -1
-                    );
-                    
-                    // Hedefe olan yönün tersine hareket
-                    if (Random.value < 0.7f)
-                    {
-                        xOffset = Mathf.Abs(xOffset) * -dirToEnd.x;
-                        yOffset = Mathf.Abs(yOffset) * -dirToEnd.y;
-                    }
-                }
-                
-                waypoint = new Vector2Int(
-                    Mathf.Clamp(lastPoint.x + xOffset, 1, width - 2),
-                    Mathf.Clamp(lastPoint.y + yOffset, 1, height - 2)
-                );
+                prefab = crossPrefab; // Cross tile (fallback)
             }
 
-            // Yol üzerinde zaten var olan nokta mı kontrol et
-            if (!waypoints.Contains(waypoint) && waypoint != end)
-            {
-                waypoints.Add(waypoint);
-                lastPoint = waypoint;
-            }
-            
-            // Zorlaştırma: Zorluk yüksekse ve son waypoint çok yakınsa, biraz daha uzat
-            if (difficultyRating > 7 && i == waypointCount - 1 && Vector2Int.Distance(lastPoint, end) < 3)
-            {
-                // Son noktadan uzaklaş, yolu daha da uzat
-                Vector2Int extraPoint = new Vector2Int(
-                    Mathf.Clamp(lastPoint.x + Random.Range(-width/3, width/3+1), 1, width - 2),
-                    Mathf.Clamp(lastPoint.y + Random.Range(-height/3, height/3+1), 1, height - 2)
-                );
-                
-                if (!waypoints.Contains(extraPoint) && extraPoint != end)
-                {
-                    waypoints.Add(extraPoint);
-                    lastPoint = extraPoint;
-                }
-            }
+            bool isKeyTile = keyTilePositions != null && keyTilePositions.Contains(pos);
+            bool isOnCriticalPath = criticalPath != null && criticalPath.Contains(pos);
+            PlaceOrientedTile(pos, prefab, directions, isKeyTile, isOnCriticalPath);
         }
-        
-        waypoints.Add(end);
-
-        // Waypoint'ler arası yol oluşturma
-        List<Vector2Int> finalPath = new List<Vector2Int>();
-        finalPath.Add(start);
-
-        for (int i = 1; i < waypoints.Count; i++)
-        {
-            // Zorluğa göre direkt yol olasılığını azalt
-            float subpathDirectBias = Mathf.Max(0.1f, directPathBias - (difficultyRating / 20f));
-            var subPath = FindSubPath(waypoints[i-1], waypoints[i], subpathDirectBias);
-            finalPath.AddRange(subPath.Skip(1));
-        }
-
-        return finalPath;
     }
-    
-    private List<Vector2Int> FindSubPath(Vector2Int subStart, Vector2Int subEnd, float directPathBias)
+}
+private void PlaceOrientedTile(Vector2Int pos, GameObject prefab, List<int> desiredDirections, bool isKeyTile = false, bool isOnCriticalPath = false)
+{
+    if (!InBounds(pos) || pos == startPos || pos == endPos)
+        return;
+
+    Quaternion rotation = CalculateTileRotation(prefab, desiredDirections);
+    GameObject go;
+
+#if UNITY_EDITOR
+    go = UnityEditor.PrefabUtility.InstantiatePrefab(prefab, container) as GameObject;
+    go.transform.position = new Vector3(pos.x * spacing, 0, pos.y * spacing);
+    go.transform.rotation = rotation;
+#else
+    go = Instantiate(prefab, new Vector3(pos.x * spacing, 0, pos.y * spacing), rotation, container);
+#endif
+
+    go.name = $"{prefab.name}_{pos.x}_{pos.y}";
+    var tile = go.GetComponent<Tile>();
+    if (tile == null)
     {
-        // Zorluğa göre rastgele yön tercihi (daha karmaşık yollar için)
-        bool preferRandomDirections = difficultyRating > 6 && Random.value > directPathBias;
-        
-        var queue = new Queue<Vector2Int>();
+        Debug.LogError($"Tile component missing on prefab {prefab.name} at {pos}");
+        DestroyImmediate(go);
+        return;
+    }
+
+    // Apply materials
+    var renderer = tile.GetComponentInChildren<Renderer>();
+    if (isKeyTile && keyTileMaterial != null && renderer != null)
+    {
+        renderer.material = keyTileMaterial;
+    }
+    else if (isOnCriticalPath && criticalPathMaterial != null && difficultyRating <= 3 && renderer != null)
+    {
+        renderer.material = criticalPathMaterial;
+    }
+
+    // Verify tile directions match desired directions
+    List<int> actualDirections = tile.openDirections;
+    if (desiredDirections.Any(d => !actualDirections.Contains(d)))
+    {
+        Debug.LogWarning($"Tile at {pos} has mismatched directions. Desired: {string.Join(",", desiredDirections)}, Actual: {string.Join(",", actualDirections)}");
+    }
+
+    grid[pos.y, pos.x] = tile;
+    if (!tiles.Contains(tile))
+        tiles.Add(tile);
+}
+
+private bool ValidateLevelSolvability()
+{
+    if (grid == null || grid.GetLength(0) != height || grid.GetLength(1) != width)
+    {
+        Debug.LogError("Grid is null or has invalid dimensions");
+        return false;
+    }
+
+    if (!InBounds(startPos) || !InBounds(endPos))
+    {
+        Debug.LogError($"Invalid start ({startPos}) or end ({endPos}) position");
+        return false;
+    }
+
+    var startTile = grid[startPos.y, startPos.x];
+    var endTile = grid[endPos.y, endPos.x];
+    if (startTile == null || endTile == null)
+    {
+        Debug.LogError("Start or end tile is null");
+        return false;
+    }
+
+    // Use BFS to find a valid path, considering rotatable key tiles
+    var visited = new HashSet<Vector2Int>();
+    var queue = new Queue<(Vector2Int pos, List<int> directions)>();
+    var cameFrom = new Dictionary<Vector2Int, Vector2Int>();
+
+    // Start with the start tile's directions
+    queue.Enqueue((startPos, startTile.openDirections ?? new List<int>()));
+    visited.Add(startPos);
+
+    Vector2Int[] directions = { Vector2Int.up, Vector2Int.right, Vector2Int.down, Vector2Int.left };
+    int[] dirMapping = { 1, 2, 3, 4 }; // North, East, South, West
+
+    while (queue.Count > 0)
+    {
+        var (currentPos, currentDirs) = queue.Dequeue();
+        if (currentPos == endPos)
+        {
+            Debug.Log("Valid path found to end tile");
+            return true;
+        }
+
+        var currentTile = grid[currentPos.y, currentPos.x];
+        if (currentTile == null || currentDirs == null || currentDirs.Count == 0)
+        {
+            Debug.LogWarning($"Tile at {currentPos} is null or has no directions");
+            continue;
+        }
+
+        for (int i = 0; i < directions.Length; i++)
+        {
+            int dir = dirMapping[i];
+            if (!currentDirs.Contains(dir))
+                continue;
+
+            var neighborPos = currentPos + directions[i];
+            if (!InBounds(neighborPos) || visited.Contains(neighborPos))
+                continue;
+
+            var neighborTile = grid[neighborPos.y, neighborPos.x];
+            if (neighborTile == null || neighborTile.openDirections == null)
+            {
+                Debug.LogWarning($"Neighbor tile at {neighborPos} is null or has no directions");
+                continue;
+            }
+
+            // Check if neighbor can connect back
+            int oppositeDir = GetOppositeDirection(dir);
+            List<int> neighborDirs = neighborTile.openDirections;
+
+            // If neighbor is a key tile, try all possible rotations
+            bool isKeyTile = keyTilePositions != null && keyTilePositions.Contains(neighborPos);
+            bool canConnect = false;
+
+            if (isKeyTile)
+            {
+                for (int rot = 0; rot < 4; rot++)
+                {
+                    List<int> rotatedDirs = neighborTile.openDirections
+                        .Select(d => ((d - 1 + rot) % 4) + 1)
+                        .ToList();
+                    if (rotatedDirs.Contains(oppositeDir))
+                    {
+                        canConnect = true;
+                        queue.Enqueue((neighborPos, rotatedDirs));
+                        visited.Add(neighborPos);
+                        cameFrom[neighborPos] = currentPos;
+                        break;
+                    }
+                }
+            }
+            else if (neighborDirs.Contains(oppositeDir))
+            {
+                canConnect = true;
+                queue.Enqueue((neighborPos, neighborDirs));
+                visited.Add(neighborPos);
+                cameFrom[neighborPos] = currentPos;
+            }
+
+            if (!canConnect)
+            {
+                Debug.LogWarning($"Cannot connect from {currentPos} (dir {dir}) to {neighborPos} (needs {oppositeDir})");
+            }
+        }
+    }
+
+    // Log the path attempted for debugging
+    Debug.LogWarning("No valid path found. Attempted positions: " + string.Join(", ", visited));
+    return false;
+}
+
+private void FillRemainingTiles()
+{
+    // Reduced cross tile chance to prevent excessive connectivity
+    float emptyChance = Mathf.Lerp(0.2f, 0.4f, (difficultyRating - 1) / 9f);
+    float straightChance = 0.4f;
+    float cornerChance = 0.3f;
+    float tChance = 0.15f;
+    float crossChance = 0.05f;
+
+    Debug.Log($"Tile distribution - Empty: {emptyChance:F2}, Straight: {straightChance:F2}, " +
+              $"Corner: {cornerChance:F2}, T: {tChance:F2}, Cross: {crossChance:F2}");
+
+    // Build reserved positions
+    HashSet<Vector2Int> reservedPositions = new HashSet<Vector2Int>();
+    if (criticalPath != null)
+        reservedPositions.UnionWith(criticalPath);
+    if (keyTilePositions != null)
+        reservedPositions.UnionWith(keyTilePositions);
+    reservedPositions.Add(startPos);
+    reservedPositions.Add(endPos);
+
+    // Fill empty grid positions
+    for (int y = 0; y < height; y++)
+    {
+        for (int x = 0; x < width; x++)
+        {
+            var pos = new Vector2Int(x, y);
+            if (reservedPositions.Contains(pos) || grid[y, x] != null)
+                continue;
+
+            float adjustedEmptyChance = emptyChance;
+            if (criticalPath != null)
+            {
+                float minDistance = criticalPath.Min(p => Vector2Int.Distance(pos, p));
+                if (minDistance < 2)
+                    adjustedEmptyChance *= 0.2f; // Strongly favor connections near critical path
+            }
+
+            float r = Random.value;
+            GameObject selectedPrefab = null;
+            List<int> directions = new List<int>();
+
+            if (r < adjustedEmptyChance)
+            {
+                selectedPrefab = emptyPrefab;
+            }
+            else if (r < adjustedEmptyChance + straightChance)
+            {
+                selectedPrefab = straightPrefab;
+                directions = Random.value < 0.5f ? new List<int> { 1, 3 } : new List<int> { 2, 4 };
+            }
+            else if (r < adjustedEmptyChance + straightChance + cornerChance)
+            {
+                selectedPrefab = cornerPrefab;
+                int firstDir = Random.Range(1, 5);
+                int secondDir;
+                do
+                {
+                    secondDir = Random.Range(1, 5);
+                } while (secondDir == firstDir || Mathf.Abs(firstDir - secondDir) == 2);
+                directions.Add(firstDir);
+                directions.Add(secondDir);
+            }
+            else if (r < adjustedEmptyChance + straightChance + cornerChance + tChance)
+            {
+                selectedPrefab = tPrefab;
+                int excludeDir = Random.Range(1, 5);
+                for (int i = 1; i <= 4; i++)
+                    if (i != excludeDir)
+                        directions.Add(i);
+            }
+            else
+            {
+                selectedPrefab = crossPrefab;
+                directions = new List<int> { 1, 2, 3, 4 };
+            }
+
+            PlaceTile(pos, selectedPrefab, directions);
+        }
+    }
+
+    // Fill any remaining gaps
+    for (int y = 0; y < height; y++)
+    {
+        for (int x = 0; x < width; x++)
+        {
+            var pos = new Vector2Int(x, y);
+            if (reservedPositions.Contains(pos) || grid[y, x] != null)
+                continue;
+
+            Debug.LogWarning($"Missing tile at {pos}, placing empty tile");
+            PlaceTile(pos, emptyPrefab, new List<int>());
+        }
+    }
+}
+private List<Vector2Int> BuildPath(Vector2Int start, Vector2Int end)
+{
+    List<Vector2Int> path = new List<Vector2Int> { start };
+    Vector2Int current = start;
+    int maxIterations = width * height * 2;
+
+    float directPathBias = Mathf.Lerp(0.95f, 0.75f, (difficultyRating - 1) / 9f);
+
+    while (current != end && maxIterations > 0)
+    {
+        bool directPath = Random.value < directPathBias;
+        Vector2Int next;
+
+        if (directPath)
+        {
+            Vector2Int dir = new Vector2Int(
+                Mathf.Clamp(end.x - current.x, -1, 1),
+                Mathf.Clamp(end.y - current.y, -1, 1)
+            );
+            if (dir.x != 0 && dir.y != 0)
+                dir.y = Random.value < 0.5f ? 0 : dir.y;
+            next = current + dir;
+        }
+        else
+        {
+            Vector2Int[] directions = { Vector2Int.up, Vector2Int.right, Vector2Int.down, Vector2Int.left };
+            next = current + directions[Random.Range(0, directions.Length)];
+        }
+
+        if (InBounds(next) && !path.Contains(next))
+        {
+            path.Add(next);
+            current = next;
+        }
+
+        maxIterations--;
+    }
+
+    if (current != end)
+    {
+        Debug.LogWarning("Pathfinding failed, using direct path as fallback");
+        // Fallback: Create a simple L-shaped path
+        path = new List<Vector2Int> { start };
+        current = start;
+
+        // Move horizontally to align with end.x
+        while (current.x != end.x)
+        {
+            int step = current.x < end.x ? 1 : -1;
+            current = new Vector2Int(current.x + step, current.y);
+            if (InBounds(current) && !path.Contains(current))
+                path.Add(current);
+        }
+
+        // Move vertically to reach end.y
+        while (current.y != end.y)
+        {
+            int step = current.y < end.y ? 1 : -1;
+            current = new Vector2Int(current.x, current.y + step);
+            if (InBounds(current) && !path.Contains(current))
+                path.Add(current);
+        }
+
+        if (current != end)
+        {
+            Debug.LogError("Fallback path failed");
+            return new List<Vector2Int> { start, end }; // Minimal path
+        }
+    }
+
+    Debug.Log($"Path length: {path.Count}");
+    return path;
+}
+    private List<Vector2Int> FindSubPath(Vector2Int subStart, Vector2Int subEnd, float windingFactor)
+    {
+        var openSet = new PriorityQueue<Vector2Int>(Comparer<Vector2Int>.Create((a, b) =>
+        {
+            float costA = Vector2Int.Distance(a, subEnd) + Random.value * windingFactor * 5;
+            float costB = Vector2Int.Distance(b, subEnd) + Random.value * windingFactor * 5;
+            return costA.CompareTo(costB);
+        }));
         var cameFrom = new Dictionary<Vector2Int, Vector2Int>();
+        var gScore = new Dictionary<Vector2Int, float> { [subStart] = 0 };
         var visited = new HashSet<Vector2Int>();
 
-        queue.Enqueue(subStart);
-        visited.Add(subStart);
-        cameFrom[subStart] = subStart; // Başlangıç noktasının kendisinden geldiğini işaretle
+        openSet.Enqueue(subStart);
+        cameFrom[subStart] = subStart;
 
-        Vector2Int[] directions = new Vector2Int[]
+        Vector2Int[] directions = { Vector2Int.up, Vector2Int.right, Vector2Int.down, Vector2Int.left };
+
+        while (openSet.Count > 0)
         {
-            Vector2Int.up,    // Kuzey
-            Vector2Int.right, // Doğu
-            Vector2Int.down,  // Güney
-            Vector2Int.left   // Batı
-        };
-
-        bool pathFound = false;
-        while (queue.Count > 0)
-        {
-            var current = queue.Dequeue();
-
+            var current = openSet.Dequeue();
             if (current == subEnd)
-            {
-                pathFound = true;
                 break;
-            }
 
-            // Eğer zorluk yüksekse ve rastgele yön tercihi aktifse, her seferinde farklı yönleri tercih et
-            Vector2Int[] shuffledDirections;
-            
-            if (preferRandomDirections)
-            {
-                // Hedeften uzaklaşma eğilimi
-                Vector2Int dirToEnd = new Vector2Int(
-                    Mathf.Clamp(subEnd.x - current.x, -1, 1),
-                    Mathf.Clamp(subEnd.y - current.y, -1, 1)
-                );
-                
-                // En uzak yönleri önce dene
-                shuffledDirections = directions.OrderBy(d => 
-                {
-                    // Hedeften uzak yönlere öncelik ver
-                    if (difficultyRating > 8 && Random.value < 0.4f)
-                        return Vector2.Dot(new Vector2(d.x, d.y), new Vector2(dirToEnd.x, dirToEnd.y));
-                    else
-                        return Random.value;
-                }).ToArray();
-            }
-            else
-            {
-                // Normal rastgele sıralama
-                shuffledDirections = directions.OrderBy(d => Random.value).ToArray();
-            }
-            
-            foreach (var direction in shuffledDirections)
-            {
-                var neighbor = current + direction;
+            visited.Add(current);
 
-                if (InBounds(neighbor) && !visited.Contains(neighbor))
+            // Shuffle directions for randomness
+            var shuffledDirections = directions.OrderBy(d => Random.value).ToArray();
+            foreach (var dir in shuffledDirections)
+            {
+                var neighbor = current + dir;
+                if (!InBounds(neighbor) || visited.Contains(neighbor))
+                    continue;
+
+                float tentativeGScore = gScore[current] + 1;
+                if (!gScore.ContainsKey(neighbor) || tentativeGScore < gScore[neighbor])
                 {
-                    visited.Add(neighbor);
                     cameFrom[neighbor] = current;
-                    queue.Enqueue(neighbor);
+                    gScore[neighbor] = tentativeGScore;
+                    openSet.Enqueue(neighbor);
                 }
             }
         }
 
+        // Reconstruct path
         var path = new List<Vector2Int>();
-        if (pathFound)
+        if (cameFrom.ContainsKey(subEnd))
         {
-            // Yolu geriye doğru oluştur
             var current = subEnd;
             while (current != subStart)
             {
@@ -1591,29 +1850,18 @@ public class LevelGeneratorEditor : Editor
                 current = cameFrom[current];
             }
             path.Add(subStart);
-            path.Reverse(); // Baştan sona doğru sırala
+            path.Reverse();
         }
         else
         {
-            Debug.LogError($"FindSubPath: {subStart} ve {subEnd} arasında yol bulunamadı!");
-            // Acil durum: Direkt bir çizgi çizmeye çalış
-            var emergencyPath = new List<Vector2Int>();
-            Vector2Int tempCurrent = subStart;
-            emergencyPath.Add(tempCurrent);
-            while(tempCurrent != subEnd && emergencyPath.Count < (width + height) * 2)
-            {
-                if (tempCurrent.x < subEnd.x) tempCurrent.x++;
-                else if (tempCurrent.x > subEnd.x) tempCurrent.x--;
-                else if (tempCurrent.y < subEnd.y) tempCurrent.y++;
-                else if (tempCurrent.y > subEnd.y) tempCurrent.y--;
-                emergencyPath.Add(tempCurrent);
-            }
-            return emergencyPath;
+            Debug.LogWarning($"No path found from {subStart} to {subEnd}. Using direct path.");
+            path.Add(subStart);
+            path.Add(subEnd);
         }
-        
+
         return path;
     }
-
+    
     List<int> GatherDirections(Vector2Int prev, Vector2Int cur, Vector2Int next)
     {
         var dirs = new HashSet<int>();
@@ -1697,11 +1945,11 @@ public class LevelGeneratorEditor : Editor
     {
         if (!InBounds(pos))
         {
-            Debug.LogError($"Geçersiz pozisyon: {pos}");
+            Debug.LogError($"Invalid position: {pos}");
             return;
         }
 
-        // Start ve End pozisyonlarına tile yerleştirmeyi engelle
+        // Skip start and end positions
         if (pos == startPos || pos == endPos)
         {
             return;
@@ -1709,7 +1957,7 @@ public class LevelGeneratorEditor : Editor
 
         try
         {
-            // Mevcut tile'ı temizle (Start ve End hariç)
+            // Clean up existing tile if present
             if (grid[pos.y, pos.x] != null && grid[pos.y, pos.x] != startTile && grid[pos.y, pos.x] != endTile)
             {
                 // Remove from tiles list if it exists
@@ -1722,18 +1970,38 @@ public class LevelGeneratorEditor : Editor
                 grid[pos.y, pos.x] = null;
             }
 
-            // Eğer bu pozisyonda Start veya End tile varsa, yeni tile oluşturma
-            if (grid[pos.y, pos.x] == startTile || grid[pos.y, pos.x] == endTile)
+            // If this position already has a tile (start or end), don't create a new one
+            if (grid[pos.y, pos.x] != null)
             {
                 return;
             }
 
-            // Yeni tile oluştur - prefab bağlantısını koruyarak
+            // Ensure we have a prefab to instantiate
+            if (prefab == null)
+            {
+                Debug.LogError($"Null prefab provided for position {pos}. Using empty prefab as fallback.");
+                prefab = emptyPrefab;
+                
+                // If empty prefab is also null, we can't continue
+                if (prefab == null)
+                {
+                    Debug.LogError("Empty prefab is null. Cannot create tile.");
+                    return;
+                }
+            }
+
+            // Create the container if needed
+            if (container == null)
+            {
+                container = GetOrCreateContainer();
+            }
+
+            // Create new tile - preserve prefab connection
             GameObject go;
 #if UNITY_EDITOR
             go = UnityEditor.PrefabUtility.InstantiatePrefab(prefab, container) as GameObject;
             go.transform.position = new Vector3(pos.x * spacing, 0, pos.y * spacing);
-            go.transform.rotation = prefab.transform.rotation; // Use the prefab's original rotation
+            //go.transform.rotation = prefab.transform.rotation; // Use the prefab's original rotation
 #else
             go = Instantiate(prefab,
                 new Vector3(pos.x * spacing, 0, pos.y * spacing),
@@ -1744,20 +2012,28 @@ public class LevelGeneratorEditor : Editor
             go.name = $"{prefab.name}_{pos.x}_{pos.y}";
             var tile = go.GetComponent<Tile>();
 
-            // IMPORTANT: No longer modifying the openings/directions
-            // The prefab's original openings will be preserved
+            if (tile == null)
+            {
+                Debug.LogError($"Created object does not have a Tile component at position {pos}");
+                return;
+            }
 
+            // Add to grid and tiles list
             grid[pos.y, pos.x] = tile;
-            
-            // Add to tiles list
             if (!tiles.Contains(tile))
             {
                 tiles.Add(tile);
             }
+
+            // Verify the tile was added to the grid
+            if (grid[pos.y, pos.x] == null)
+            {
+                Debug.LogError($"Failed to add tile to grid at position {pos}");
+            }
         }
         catch (System.Exception e)
         {
-            Debug.LogError($"Tile yerleştirme hatası: {e.Message}");
+            Debug.LogError($"Tile placement error at {pos}: {e.Message}");
         }
     }
 
@@ -1900,4 +2176,373 @@ public class LevelGeneratorEditor : Editor
         }
     }
     #endif
+
+    // Instantiate the planned level
+    private void InstantiatePlannedLevel(List<TilePlan> plan)
+    {
+        try
+        {
+            Debug.Log("Creating planned level...");
+            
+            // Get or create the container
+            container = GetOrCreateContainer();
+            
+            // Initialize the grid
+            grid = new Tile[height, width];
+            tiles.Clear();
+            
+            // Instantiate all planned tiles
+            foreach (var tilePlan in plan)
+            {
+                // Calculate the correct rotation based on the tile's directions
+                Quaternion tileRotation = CalculateTileRotation(tilePlan.prefab, tilePlan.directions);
+                
+                // Create the tile with the calculated rotation
+                GameObject go;
+#if UNITY_EDITOR
+                go = UnityEditor.PrefabUtility.InstantiatePrefab(tilePlan.prefab, container) as GameObject;
+                go.transform.position = new Vector3(tilePlan.position.x * spacing, 0, tilePlan.position.y * spacing);
+                //go.transform.rotation = tileRotation;
+#else
+                go = Instantiate(
+                    tilePlan.prefab,
+                    new Vector3(tilePlan.position.x * spacing, 0, tilePlan.position.y * spacing),
+                    tilePlan.prefab.transform.rotation,
+                    container
+                );
+#endif
+                
+                go.name = $"{tilePlan.prefab.name}_{tilePlan.position.x}_{tilePlan.position.y}";
+                var tile = go.GetComponent<Tile>();
+                
+                if (tile == null)
+                {
+                    Debug.LogError($"Tile component missing on prefab: {tilePlan.prefab.name}");
+                    continue;
+                }
+                
+                // Add to grid and list
+                grid[tilePlan.position.y, tilePlan.position.x] = tile;
+                tiles.Add(tile);
+                
+                // Apply special materials for critical path and key tiles
+                if (tilePlan.isKeyTile && keyTileMaterial != null)
+                {
+                    var renderer = tile.GetComponentInChildren<Renderer>();
+                    if (renderer != null)
+                    {
+                        renderer.material = keyTileMaterial;
+                    }
+                }
+                else if (tilePlan.isOnCriticalPath && criticalPathMaterial != null && difficultyRating <= 3)
+                {
+                    // Only show critical path hints at low difficulties
+                    var renderer = tile.GetComponentInChildren<Renderer>();
+                    if (renderer != null)
+                    {
+                        renderer.material = criticalPathMaterial;
+                    }
+                }
+                
+                // Store references to start and end tiles
+                if (tilePlan.position == startPos)
+                {
+                    startTile = tile;
+                }
+                else if (tilePlan.position == endPos)
+                {
+                    endTile = tile;
+                }
+            }
+            
+            // Assign neighbors
+            AssignNeighbors();
+            
+            // Notify LevelManager about start and end tiles
+            var levelManager = FindObjectOfType<LevelManager>();
+            if (levelManager != null && startTile != null && endTile != null)
+            {
+                levelManager.SetStartAndEndTiles(startTile, endTile);
+                Debug.Log($"Set start tile {startTile.name} and end tile {endTile.name} on LevelManager");
+            }
+            
+            Debug.Log($"Level successfully created! {tiles.Count} tiles placed.");
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"Level creation error: {e.Message}\n{e.StackTrace}");
+        }
+    }
+    
+    // Plan paths without instantiating
+    private void PlanPaths(List<List<Vector2Int>> paths, Dictionary<Vector2Int, List<int>> planningGrid)
+    {
+        foreach(var path in paths)
+        {
+            for (int i = 1; i < path.Count - 1; i++)
+            {
+                var prev = path[i - 1];
+                var cur = path[i];
+                var next = path[i + 1];
+
+                // Gather directions for this tile
+                var dirs = GatherDirections(prev, cur, next);
+                
+                // Add to planning grid, merging with existing directions if needed
+                if (planningGrid.ContainsKey(cur))
+                {
+                    // Merge directions
+                    foreach (int dir in dirs)
+                    {
+                        if (!planningGrid[cur].Contains(dir))
+                        {
+                            planningGrid[cur].Add(dir);
+                        }
+                    }
+                }
+                else
+                {
+                    planningGrid[cur] = dirs;
+                }
+            }
+        }
+    }
+    
+    // Plan dead ends without instantiating
+    private void PlanDeadEnds(Dictionary<Vector2Int, List<int>> planningGrid)
+    {
+        Debug.Log("Planning dead ends...");
+        int deadEndCount = Mathf.RoundToInt(Mathf.Lerp(5, 20, (difficultyRating - 1) / 9f));
+        int placedDeadEnds = 0;
+        int maxAttempts = deadEndCount * 5;
+
+        // Collect potential anchor points (tiles on paths)
+        List<Vector2Int> anchorPoints = planningGrid.Keys
+            .Where(p => p != startPos && p != endPos && planningGrid[p].Count >= 2)
+            .ToList();
+
+        while (placedDeadEnds < deadEndCount && maxAttempts > 0)
+        {
+            maxAttempts--;
+            Vector2Int pos = anchorPoints[Random.Range(0, anchorPoints.Count)];
+            List<int> directions = planningGrid[pos];
+
+            int deadEndDir = directions[Random.Range(0, directions.Count)];
+            Vector2Int neighborPos = GetNeighborPosition(pos, deadEndDir);
+
+            if (InBounds(neighborPos) && !planningGrid.ContainsKey(neighborPos))
+            {
+                planningGrid[neighborPos] = new List<int> { GetOppositeDirection(deadEndDir) };
+                placedDeadEnds++;
+                // Add the neighbor to anchor points for potential chaining
+                if (difficultyRating > 7 && Random.value < 0.3f)
+                    anchorPoints.Add(neighborPos);
+            }
+        }
+
+        Debug.Log($"Total of {placedDeadEnds} dead ends planned.");
+    }
+        // Plan remaining tiles without instantiating
+    
+    private void PlanRemainingTiles(Dictionary<Vector2Int, List<int>> planningGrid)
+    {
+        // Adjust tile distribution based on difficulty
+        float emptyChance = Mathf.Lerp(0.3f, 0.5f, (difficultyRating - 1) / 9f);       
+        float straightChance = Mathf.Lerp(0.3f, 0.3f, (difficultyRating - 1) / 9f);   
+        float cornerChance = Mathf.Lerp(0.25f, 0.15f, (difficultyRating - 1) / 9f);    
+        float tChance = Mathf.Lerp(0.12f, 0.04f, (difficultyRating - 1) / 9f);         
+        float crossChance = Mathf.Lerp(0.03f, 0.01f, (difficultyRating - 1) / 9f);      
+        
+        Debug.Log($"Tile distribution - Empty: {emptyChance:F2}, Straight: {straightChance:F2}, " +
+                  $"Corner: {cornerChance:F2}, T: {tChance:F2}, Cross: {crossChance:F2}");
+        
+        // Check for reserved positions (key tiles)
+        HashSet<Vector2Int> reservedPositions = new HashSet<Vector2Int>();
+        if (keyTilePositions != null)
+        {
+            foreach (var pos in keyTilePositions)
+            {
+                reservedPositions.Add(pos);
+            }
+        }
+        
+        // Track positions still needing tiles
+        List<Vector2Int> positionsToFill = new List<Vector2Int>();
+        
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                var pos = new Vector2Int(x, y);
+                
+                // Skip already planned positions
+                if (planningGrid.ContainsKey(pos) || reservedPositions.Contains(pos))
+                    continue;
+                
+                // Add to positions needing tiles
+                positionsToFill.Add(pos);
+            }
+        }
+        
+        // First pass: random distribution based on probabilities
+        foreach (var pos in positionsToFill)
+        {
+            float r = Random.value;
+            List<int> dirs = new List<int>();
+            
+            // On higher difficulties, also consider the position's distance to the main path
+            if (difficultyRating > 5 && criticalPath != null)
+            {
+                // Check if this position is far from the critical path
+                bool farFromCriticalPath = true;
+                float minDistance = float.MaxValue;
+                
+                foreach (var critPos in criticalPath)
+                {
+                    float distance = Vector2Int.Distance(pos, critPos);
+                    minDistance = Mathf.Min(minDistance, distance);
+                    if (distance < 3)
+                    {
+                        farFromCriticalPath = false;
+                        break;
+                    }
+                }
+                
+                // If far from critical path, increase empty tile probability
+                if (farFromCriticalPath)
+                {
+                    // Cap maximum empty chance at 0.7 to ensure some tiles still appear
+                    emptyChance = Mathf.Min(emptyChance + 0.2f, 0.7f);
+                }
+                
+                // At the highest difficulties, ensure areas very far from path still have some connections
+                if (difficultyRating >= 9 && minDistance > 5)
+                {
+                    // If very far from path, reduce empty chance to ensure some connections
+                    emptyChance = Mathf.Max(emptyChance - 0.2f, 0.3f);
+                }
+            }
+            
+            // Determine directions based on random value
+            if (r < emptyChance)
+            {
+                // Empty tile - no directions
+            }
+            else if (r < emptyChance + straightChance)
+            {
+                // Straight tile - random orientation
+                if (Random.value < 0.5f)
+                {
+                    dirs.Add(1); // North
+                    dirs.Add(3); // South
+                }
+                else
+                {
+                    dirs.Add(2); // East
+                    dirs.Add(4); // West
+                }
+            }
+            else if (r < emptyChance + straightChance + cornerChance)
+            {
+                // Corner tile - random orientation
+                int firstDir = Random.Range(1, 5);
+                int secondDir;
+                do {
+                    secondDir = Random.Range(1, 5);
+                } while (secondDir == firstDir || Mathf.Abs(firstDir - secondDir) == 2);
+                
+                dirs.Add(firstDir);
+                dirs.Add(secondDir);
+            }
+            else if (r < emptyChance + straightChance + cornerChance + tChance)
+            {
+                // T tile - random orientation
+                int excludeDir = Random.Range(1, 5);
+                for (int i = 1; i <= 4; i++)
+                {
+                    if (i != excludeDir)
+                        dirs.Add(i);
+                }
+            }
+            else
+            {
+                // Cross tile - all directions
+                dirs.Add(1);
+                dirs.Add(2);
+                dirs.Add(3);
+                dirs.Add(4);
+            }
+            
+            // Add to planning grid
+            planningGrid[pos] = dirs;
+        }
+        
+        // Second pass: ensure all positions have an entry in the planning grid
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                var pos = new Vector2Int(x, y);
+                
+                // Skip start and end positions
+                if (pos == startPos || pos == endPos)
+                    continue;
+                    
+                // If this position doesn't have an entry, add an empty tile
+                if (!planningGrid.ContainsKey(pos))
+                {
+                    planningGrid[pos] = new List<int>();
+                    Debug.LogWarning($"Added missing empty tile at position {pos}");
+                }
+            }
+        }
+    }
+
+private Quaternion CalculateTileRotation(GameObject prefab, List<int> desiredDirections)
+{
+    if (desiredDirections == null || desiredDirections.Count == 0)
+    {
+        Debug.LogWarning($"No desired directions for {prefab.name}, using default rotation");
+        return Quaternion.identity;
+    }
+
+    var tile = prefab.GetComponent<Tile>();
+    if (tile == null || tile.openDirections == null)
+    {
+        Debug.LogWarning($"Prefab {prefab.name} has no Tile component or openDirections");
+        return Quaternion.identity;
+    }
+
+    // Try all rotations
+    for (int rot = 0; rot < 4; rot++)
+    {
+        List<int> rotatedDirections = tile.openDirections
+            .Select(d => ((d - 1 + rot) % 4) + 1)
+            .ToList();
+        if (desiredDirections.All(d => rotatedDirections.Contains(d)) &&
+            rotatedDirections.All(d => desiredDirections.Contains(d)))
+        {
+            return Quaternion.Euler(0, rot * 90, 0);
+        }
+    }
+
+    Debug.LogWarning($"No valid rotation for {prefab.name} with desired directions: {string.Join(",", desiredDirections)}");
+    // Fallback: Use a rotation that partially matches
+    for (int rot = 0; rot < 4; rot++)
+    {
+        List<int> rotatedDirections = tile.openDirections
+            .Select(d => ((d - 1 + rot) % 4) + 1)
+            .ToList();
+        if (desiredDirections.Any(d => rotatedDirections.Contains(d)))
+        {
+            Debug.LogWarning($"Using partial rotation match for {prefab.name}");
+            return Quaternion.Euler(0, rot * 90, 0);
+        }
+    }
+
+    return Quaternion.identity;
 }
+
+
+}
+

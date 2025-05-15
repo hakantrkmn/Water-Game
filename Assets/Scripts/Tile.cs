@@ -25,6 +25,7 @@ public class Tile : MonoBehaviour, IPointerDownHandler {
     public bool lastState = false;
     public bool hasWater = false;
     public List<MeshRenderer> wallRenderers = new List<MeshRenderer>();
+    public TileAnimationController tileAnimationController;
 
 /// <summary>
 /// Start is called on the frame when a script is enabled just before
@@ -32,7 +33,8 @@ public class Tile : MonoBehaviour, IPointerDownHandler {
     /// </summary>
     void Start()
     {
-        RotateRandomOnStart();
+        tileAnimationController = GetComponent<TileAnimationController>();
+        //RotateRandomOnStart();
     }
     private void Awake()
     {
@@ -91,13 +93,29 @@ public class Tile : MonoBehaviour, IPointerDownHandler {
 
     public void WaterAnimation(bool flowing)
     {
-        if(DOTween.IsTweening(this))
+        // Cancel any ongoing animations for this waterTransform
+        if (waterTransform != null)
         {
-            DOTween.Complete(this);
+            DOTween.Kill(waterTransform);
         }
-        if(flowing)
+        
+        // Each wall renderer should also have its animations killed
+        foreach (MeshRenderer renderer in wallRenderers)
         {
-            Debug.Log(waterTransform.GetComponent<MeshRenderer>().material.GetTextureOffset("_MainTex"));
+            if (renderer != null)
+            {
+                DOTween.Kill(renderer.material);
+            }
+        }
+
+        if (flowing)
+        {
+            // Debug logging for texture offset
+            var renderer = waterTransform?.GetComponent<MeshRenderer>();
+            if (renderer != null && renderer.material != null)
+            {
+                Debug.Log(renderer.material.GetTextureOffset("_MainTex"));
+            }
         }
     }
 
@@ -152,16 +170,24 @@ public class Tile : MonoBehaviour, IPointerDownHandler {
 
     public void SetWaterFlow(bool flowing, float delay = 0f)
     {
+        bool stateChanged = lastState != flowing;
         hasWater = flowing;
-        if(lastState == flowing) return;
         lastState = flowing;
-        WaterAnimation(flowing);
-        //set walls color to if flowing is false, F691D5, otherwise white
-        waterTransform.DOLocalMoveY(flowing ? 0.4f : 0.2f, tileSetting.waterSpeed).SetEase(tileSetting.waterEase).SetDelay(delay);
-        foreach(MeshRenderer wallRenderer in wallRenderers)
+        
+        // Only update visuals if the state has changed
+        if (stateChanged)
         {
-            wallRenderer.material.DOColor(flowing ? new Color(1, 1, 1, 0.8f) : new Color(0.96f, 0.57f, 0.83f, 0.8f), 0.3f).SetEase(Ease.InOutSine);
+            WaterAnimation(flowing);
+            waterTransform.DOLocalMoveY(flowing ? 0.4f : 0.2f, tileSetting.waterSpeed).SetEase(tileSetting.waterEase).SetDelay(delay);
+            foreach(MeshRenderer wallRenderer in wallRenderers)
+            {
+                wallRenderer.material.DOColor(flowing ? new Color(1, 1, 1, 0.8f) : new Color(0.96f, 0.57f, 0.83f, 0.8f), 0.3f).SetEase(Ease.InOutSine);
+            }
+
         }
+        
+        // We don't need to call back to LevelManager here as the water flow is handled by the AnimateWaterFlow coroutine
+        // The LevelManager will continue the flow automatically through its own logic
     }
     public void OnPointerDown(PointerEventData eventData)
     {

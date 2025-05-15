@@ -37,6 +37,6 @@ public class UIController : MonoBehaviour
     }
     public void OnNextLevelButtonClicked()
     {
-        SceneManager.LoadScene(ES3.Load("level").ToString());
+        SceneManager.LoadScene("Scene_" + ES3.Load("level").ToString());
     }
 }

@@ -47,7 +47,6 @@ GameObject:
   - component: {fileID: 514065315345424002}
   - component: {fileID: 1815525142123992344}
   - component: {fileID: 8952527927326597884}
-  - component: {fileID: -6622207051145531951}
   m_Layer: 0
   m_Name: StartTile
   m_TagString: Untagged
@@ -174,33 +173,7 @@ MonoBehaviour:
   - {fileID: 898490830335058067}
   - {fileID: 5887725095903069494}
   - {fileID: 3444561048131720141}
---- !u!54 &-6622207051145531951
-Rigidbody:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 7078127245069003121}
-  serializedVersion: 5
-  m_Mass: 1
-  m_LinearDamping: 0
-  m_AngularDamping: 0.05
-  m_CenterOfMass: {x: 0, y: 0, z: 0}
-  m_InertiaTensor: {x: 1, y: 1, z: 1}
-  m_InertiaRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_IncludeLayers:
-    serializedVersion: 2
-    m_Bits: 0
-  m_ExcludeLayers:
-    serializedVersion: 2
-    m_Bits: 0
-  m_ImplicitCom: 1
-  m_ImplicitTensor: 1
-  m_UseGravity: 1
-  m_IsKinematic: 1
-  m_Interpolate: 0
-  m_Constraints: 0
-  m_CollisionDetection: 0
+  tileAnimationController: {fileID: 0}
 --- !u!1001 &1008379633370192566
 PrefabInstance:
   m_ObjectHideFlags: 0

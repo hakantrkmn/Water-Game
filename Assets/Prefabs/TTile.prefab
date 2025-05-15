@@ -13,7 +13,7 @@ GameObject:
   - component: {fileID: 3591036006812714038}
   - component: {fileID: 9148627329985942077}
   - component: {fileID: 6094658299103619582}
-  - component: {fileID: -2165851251332982585}
+  - component: {fileID: 7768387490055294528}
   m_Layer: 0
   m_Name: TTile
   m_TagString: Untagged
@@ -140,33 +140,38 @@ MonoBehaviour:
   - {fileID: 1448961876765657300}
   - {fileID: 5543873187986549093}
   - {fileID: 8177457822834445077}
---- !u!54 &-2165851251332982585
-Rigidbody:
+  tileAnimationController: {fileID: 0}
+--- !u!114 &7768387490055294528
+MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 724545509680851042}
-  serializedVersion: 5
-  m_Mass: 1
-  m_LinearDamping: 0
-  m_AngularDamping: 0.05
-  m_CenterOfMass: {x: 0, y: 0, z: 0}
-  m_InertiaTensor: {x: 1, y: 1, z: 1}
-  m_InertiaRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_IncludeLayers:
-    serializedVersion: 2
-    m_Bits: 0
-  m_ExcludeLayers:
-    serializedVersion: 2
-    m_Bits: 0
-  m_ImplicitCom: 1
-  m_ImplicitTensor: 1
-  m_UseGravity: 1
-  m_IsKinematic: 1
-  m_Interpolate: 0
-  m_Constraints: 0
-  m_CollisionDetection: 0
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 45b9289da0bb145cab23542166f9ee6c, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  animators:
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
+  meshRenderers:
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
+  waterAnimationNames:
+  - Floor
+  - Snake
+  - HipHop
+  - Victory
+  idleAnimationNames:
+  - Angry
+  - Bored
+  - Dizzy
+  - Praying
+  - Sad
 --- !u!1 &6726365925625253308
 GameObject:
   m_ObjectHideFlags: 0
