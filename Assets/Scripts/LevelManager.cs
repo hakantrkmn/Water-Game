@@ -17,6 +17,9 @@ public class LevelManager : MonoBehaviour
     
     private Coroutine waterFlowCoroutine;
     public bool isLevelCompleted = false;
+
+    public int totalTilesWithWater = 0;
+    public int maxFillableTiles = 0;
     private void Awake()
     {
         if (Instance == null)
@@ -151,6 +154,7 @@ public class LevelManager : MonoBehaviour
         }
         
         Tile[] allTiles = EventManager.GetAllTiles();
+        totalTilesWithWater = tilesWithWater.Count;
         //setwaterflow to false for tiles that not in tilesWithWater
         foreach(var tile in allTiles)
         {
@@ -165,11 +169,14 @@ public class LevelManager : MonoBehaviour
         {
             if (endTile.hasWater)
             {
-                isLevelCompleted = true;
-                EventManager.LevelCompleted?.Invoke();
-                Debug.Log("Success! Water reached the end tile!");
-                // Optional: Trigger level completion event
-                // EventManager.LevelCompleted?.Invoke();
+                if(totalTilesWithWater >= maxFillableTiles)
+                {
+                    isLevelCompleted = true;
+                    EventManager.LevelCompleted?.Invoke();
+                    Debug.Log("Success! Water reached the end tile!");
+                    // Optional: Trigger level completion event
+                    // EventManager.LevelCompleted?.Invoke();
+                }
             }
             else
             {
