@@ -76,6 +76,17 @@ public class LevelGeneratorEditor : Editor
             generator.CreateLevelInEditor();
         }
         
+        // Test Solvability button
+        if (GUILayout.Button("Test Solvability"))
+        {
+            bool isSolvable = generator.ValidateLevelSolvability();
+            string message = isSolvable 
+                ? "Level is solvable with proper tile rotations!" 
+                : "Level is NOT solvable even with all possible rotations!";
+                
+            EditorUtility.DisplayDialog("Level Solvability", message, "OK");
+        }
+        
         // Add some space
         EditorGUILayout.Space();
         
@@ -1142,7 +1153,7 @@ private int GetDirection(Vector2Int from, Vector2Int to)
                 path.Add(next);
                 current = next;
 
-                // Stop near the target but don’t connect
+                // Stop near the target but don't connect
                 if (Vector2Int.Distance(current, target) <= 2 && Random.value < 0.8f && difficultyRating > 5)
                 {
                     Debug.Log($"Deceptive path stopped near target at {current}");
@@ -1479,7 +1490,7 @@ private void PlaceOrientedTile(Vector2Int pos, GameObject prefab, List<int> desi
 #if UNITY_EDITOR
     go = UnityEditor.PrefabUtility.InstantiatePrefab(prefab, container) as GameObject;
     go.transform.position = new Vector3(pos.x * spacing, 0, pos.y * spacing);
-    go.transform.rotation = rotation;
+    go.transform.rotation = rotation; // Always apply rotation
 #else
     go = Instantiate(prefab, new Vector3(pos.x * spacing, 0, pos.y * spacing), rotation, container);
 #endif
@@ -1491,6 +1502,23 @@ private void PlaceOrientedTile(Vector2Int pos, GameObject prefab, List<int> desi
         Debug.LogError($"Tile component missing on prefab {prefab.name} at {pos}");
         DestroyImmediate(go);
         return;
+    }
+
+    // IMPORTANT: Update the tile's openDirections based on rotation
+    if (tile.openDirections != null && tile.openDirections.Count > 0)
+    {
+        int rotationAngle = Mathf.RoundToInt(rotation.eulerAngles.y / 90) % 4;
+        if (rotationAngle > 0)
+        {
+            List<int> rotatedDirs = new List<int>();
+            foreach (int dir in tile.openDirections)
+            {
+                // Apply rotation to each direction
+                int rotatedDir = ((dir - 1 + rotationAngle) % 4) + 1;
+                rotatedDirs.Add(rotatedDir);
+            }
+            tile.openDirections = rotatedDirs;
+        }
     }
 
     // Apply materials
@@ -1530,101 +1558,284 @@ private bool ValidateLevelSolvability()
         return false;
     }
 
-    var startTile = grid[startPos.y, startPos.x];
-    var endTile = grid[endPos.y, endPos.x];
-    if (startTile == null || endTile == null)
+    var startTileComponent = grid[startPos.y, startPos.x];
+    var endTileComponent = grid[endPos.y, endPos.x];
+    if (startTileComponent == null || endTileComponent == null)
     {
-        Debug.LogError("Start or end tile is null");
+        Debug.LogError("Start or end tile is null on the grid");
         return false;
     }
 
-    // Use BFS to find a valid path, considering rotatable key tiles
-    var visited = new HashSet<Vector2Int>();
-    var queue = new Queue<(Vector2Int pos, List<int> directions)>();
-    var cameFrom = new Dictionary<Vector2Int, Vector2Int>();
+    if (startTileComponent.openDirections == null || startTileComponent.openDirections.Count == 0)
+    {
+        Debug.LogError("Start tile has no openings!");
+        return false;
+    }
+    
+    if (endTileComponent.openDirections == null || endTileComponent.openDirections.Count == 0)
+    {
+        Debug.LogError("End tile has no openings!");
+        return false;
+    }
 
-    // Start with the start tile's directions
-    queue.Enqueue((startPos, startTile.openDirections ?? new List<int>()));
-    visited.Add(startPos);
+    if (!HasConnectedPathNonEmptyTiles(grid, startPos, endPos))
+    {
+        Debug.LogError("Level is NOT solvable - no physical path of non-empty tiles exists between start and end!");
+        return false;
+    }
 
-    Vector2Int[] directions = { Vector2Int.up, Vector2Int.right, Vector2Int.down, Vector2Int.left };
-    int[] dirMapping = { 1, 2, 3, 4 }; // North, East, South, West
+    Debug.Log("Basic path of non-empty tiles found. Performing exhaustive rotation check for solvability...");
+    bool isExhaustivelySolvable = ExhaustiveRotationSolvabilityCheck(startPos, endPos);
+    
+    if (isExhaustivelySolvable)
+    {
+        Debug.Log("Level IS solvable with proper tile rotations (exhaustive check passed)!");
+        return true;
+    }
+    else
+    {
+        Debug.LogError("Level is NOT solvable even with all possible rotations (exhaustive check failed)!");
+        return false;
+    }
+}
 
+private bool HasConnectedPathNonEmptyTiles(Tile[,] currentGrid, Vector2Int start, Vector2Int end)
+{
+    bool[,][] potentialConnections = new bool[height, width][];
+    for (int y = 0; y < height; y++)
+    {
+        for (int x = 0; x < width; x++)
+        {
+            potentialConnections[y, x] = new bool[4];
+            Tile tile = currentGrid[y, x];
+            if (tile == null || tile.openDirections == null || tile.openDirections.Count == 0)
+                continue; 
+            potentialConnections[y, x][0] = true;
+            potentialConnections[y, x][1] = true;
+            potentialConnections[y, x][2] = true;
+            potentialConnections[y, x][3] = true;
+        }
+    }
+    return HasPathWithPotentialConnections(potentialConnections, start, end);
+}
+
+private bool HasPathWithPotentialConnections(bool[,][] potentialConnections, Vector2Int start, Vector2Int end)
+{
+    HashSet<Vector2Int> visited = new HashSet<Vector2Int>();
+    Queue<Vector2Int> queue = new Queue<Vector2Int>();
+    queue.Enqueue(start);
+    visited.Add(start);
+    Vector2Int[] directions = { new Vector2Int(0, 1), new Vector2Int(1, 0), new Vector2Int(0, -1), new Vector2Int(-1, 0) };
+    
     while (queue.Count > 0)
     {
-        var (currentPos, currentDirs) = queue.Dequeue();
-        if (currentPos == endPos)
+        Vector2Int current = queue.Dequeue();
+        if (current == end) return true;
+        for (int i = 0; i < 4; i++)
         {
-            Debug.Log("Valid path found to end tile");
-            return true;
+            if (!potentialConnections[current.y, current.x][i]) continue;
+            Vector2Int neighbor = current + directions[i];
+            if (!InBounds(neighbor) || visited.Contains(neighbor)) continue;
+            Tile neighborTile = grid[neighbor.y, neighbor.x]; 
+            if (neighborTile == null || neighborTile.openDirections == null || neighborTile.openDirections.Count == 0)
+                 continue; 
+            int oppositeDirIndex = (i + 2) % 4;
+            if (!potentialConnections[neighbor.y, neighbor.x][oppositeDirIndex]) continue;
+            queue.Enqueue(neighbor);
+            visited.Add(neighbor);
         }
+    }
+    return false;
+}
 
-        var currentTile = grid[currentPos.y, currentPos.x];
-        if (currentTile == null || currentDirs == null || currentDirs.Count == 0)
+// New helper method to check if a tile instance likely came from a specific prefab by name
+private bool IsTileFromPrefabName(Tile instance, GameObject prefabReference)
+{
+    if (instance == null || prefabReference == null || string.IsNullOrEmpty(prefabReference.name)) return false;
+    // Assumes instance names are like "PrefabName_x_y", e.g., "StraightPrefab_1_2"
+    // Also handles names like "PrefabName(Clone)"
+    string instanceName = instance.gameObject.name;
+    string prefabName = prefabReference.name;
+    return instanceName.StartsWith(prefabName) || instanceName.Contains(prefabName + "(Clone)");
+}
+
+// New helper method to get the original open directions from a tile's source prefab
+private List<int> GetPrefabOpenDirections(Tile tileInstance)
+{
+    if (tileInstance == null) return new List<int>();
+
+    GameObject sourcePrefab = null;
+    string foundPrefabName = "None";
+
+    if (IsTileFromPrefabName(tileInstance, startPrefab)) { sourcePrefab = startPrefab; foundPrefabName = "StartPrefab"; }
+    else if (IsTileFromPrefabName(tileInstance, endPrefab)) { sourcePrefab = endPrefab; foundPrefabName = "EndPrefab"; }
+    else if (IsTileFromPrefabName(tileInstance, straightPrefab)) { sourcePrefab = straightPrefab; foundPrefabName = "StraightPrefab"; }
+    else if (IsTileFromPrefabName(tileInstance, cornerPrefab)) { sourcePrefab = cornerPrefab; foundPrefabName = "CornerPrefab"; }
+    else if (IsTileFromPrefabName(tileInstance, tPrefab)) { sourcePrefab = tPrefab; foundPrefabName = "TPrefab"; }
+    else if (IsTileFromPrefabName(tileInstance, crossPrefab)) { sourcePrefab = crossPrefab; foundPrefabName = "CrossPrefab"; }
+    else if (IsTileFromPrefabName(tileInstance, emptyPrefab)) { sourcePrefab = emptyPrefab; foundPrefabName = "EmptyPrefab"; }
+
+    if (sourcePrefab != null)
+    {
+        Tile prefabTileComponent = sourcePrefab.GetComponent<Tile>();
+        if (prefabTileComponent != null && prefabTileComponent.openDirections != null)
         {
-            Debug.LogWarning($"Tile at {currentPos} is null or has no directions");
-            continue;
+            // This should be the list of open directions as defined on the prefab asset.
+            // Debug.Log($"GetPrefabOpenDirections: Found prefab '{foundPrefabName}' for instance '{tileInstance.gameObject.name}'. Prefab dirs: [{string.Join(",", prefabTileComponent.openDirections)}]");
+            return new List<int>(prefabTileComponent.openDirections);
         }
-
-        for (int i = 0; i < directions.Length; i++)
+        else if (prefabTileComponent != null && prefabTileComponent.openDirections == null)
         {
-            int dir = dirMapping[i];
-            if (!currentDirs.Contains(dir))
-                continue;
+            // Prefab's Tile component explicitly has null openDirections (treat as empty)
+            // Debug.Log($"GetPrefabOpenDirections: Found prefab '{foundPrefabName}' for instance '{tileInstance.gameObject.name}'. Prefab has NULL openDirections. Returning empty list.");
+            return new List<int>();
+        }
+        else if (prefabTileComponent == null)
+        {
+            Debug.LogWarning($"GetPrefabOpenDirections: Instance '{tileInstance.gameObject.name}' matched to prefab '{foundPrefabName}', but the prefab asset is missing its Tile component. Returning empty list.");
+            return new List<int>();
+        }
+    }
+    
+    // Fallback specifically for emptyPrefab if it was identified but had issues, or if no other prefab matched.
+    if (foundPrefabName == "EmptyPrefab" || (sourcePrefab == null && emptyPrefab != null && IsTileFromPrefabName(tileInstance, emptyPrefab)))
+    {
+        // Debug.Log($"GetPrefabOpenDirections: Instance '{tileInstance.gameObject.name}' identified as EmptyPrefab or matched to it. Returning empty list.");
+        return new List<int>();
+    }
 
-            var neighborPos = currentPos + directions[i];
-            if (!InBounds(neighborPos) || visited.Contains(neighborPos))
-                continue;
+    Debug.LogWarning($"GetPrefabOpenDirections: Could NOT determine original prefab for tile instance '{tileInstance.gameObject.name}' at {tileInstance.transform.position}. Looked for matches with assigned prefabs. Defaulting to NO openings. Check prefab assignments and instance naming. Is '{tileInstance.gameObject.name}' based on one of the known prefabs (Start, End, Straight, Corner, T, Cross, Empty)?");
+    return new List<int>(); 
+}
 
-            var neighborTile = grid[neighborPos.y, neighborPos.x];
-            if (neighborTile == null || neighborTile.openDirections == null)
+private bool ExhaustiveRotationSolvabilityCheck(Vector2Int start, Vector2Int end)
+{
+    Dictionary<Vector2Int, List<int>> originalPrefabOpenings = new Dictionary<Vector2Int, List<int>>();
+    for (int y = 0; y < height; y++)
+    {
+        for (int x = 0; x < width; x++)
+        {
+            Tile currentTileOnGrid = grid[y, x];
+            if (currentTileOnGrid != null)
             {
-                Debug.LogWarning($"Neighbor tile at {neighborPos} is null or has no directions");
-                continue;
+                // Get the base open directions from the tile's source prefab
+                List<int> prefabDirs = GetPrefabOpenDirections(currentTileOnGrid);
+                originalPrefabOpenings[new Vector2Int(x, y)] = prefabDirs; // Store even if empty (e.g. for empty tiles)
             }
-
-            // Check if neighbor can connect back
-            int oppositeDir = GetOppositeDirection(dir);
-            List<int> neighborDirs = neighborTile.openDirections;
-
-            // If neighbor is a key tile, try all possible rotations
-            bool isKeyTile = keyTilePositions != null && keyTilePositions.Contains(neighborPos);
-            bool canConnect = false;
-
-            if (isKeyTile)
+            else
             {
-                for (int rot = 0; rot < 4; rot++)
+                // If there's no tile on the grid, treat as an empty space for pathfinding purposes
+                originalPrefabOpenings[new Vector2Int(x, y)] = new List<int>();
+            }
+        }
+    }
+    // Pass the true original prefab openings to the recursive function
+    return TryToFindPathWithRotationsRecursive(originalPrefabOpenings, start, end, new HashSet<Vector2Int>(), 0); // 0 for start tile's incoming direction
+}
+
+private bool CanTileConnectInDirection(List<int> originalOpenDirs, int requiredDirection)
+{
+    if (originalOpenDirs == null || originalOpenDirs.Count == 0) return false; 
+    for (int rotation = 0; rotation < 4; rotation++)
+    {
+        bool canConnectThisRotation = false;
+        foreach (int dir in originalOpenDirs)
+        {
+            int rotatedDir = ((dir - 1 + rotation) % 4) + 1;
+            if (rotatedDir == requiredDirection)
+            {
+                canConnectThisRotation = true;
+                break;
+            }
+        }
+        if (canConnectThisRotation) return true;
+    }
+    return false;
+}
+
+// Revised TryToFindPathWithRotationsRecursive
+private bool TryToFindPathWithRotationsRecursive(
+    Dictionary<Vector2Int, List<int>> originalTileOpenings, 
+    Vector2Int currentPos, 
+    Vector2Int endPos, 
+    HashSet<Vector2Int> visited,
+    int requiredIncomingDirectionForCurrentPos) // 0 for start tile, 1-4 for others
+{
+    if (currentPos == endPos) return true;
+
+    visited.Add(currentPos);
+
+    if (!originalTileOpenings.ContainsKey(currentPos)) // Should not happen if map is fully populated
+    {
+        visited.Remove(currentPos);
+        return false; 
+    }
+    List<int> currentTileOriginalOpenDirs = originalTileOpenings[currentPos];
+    if (currentTileOriginalOpenDirs.Count == 0) // Current tile is an empty tile, cannot be part of a path
+    {
+        visited.Remove(currentPos);
+        return false;
+    }
+
+    Vector2Int[] worldDirections = { Vector2Int.up, Vector2Int.right, Vector2Int.down, Vector2Int.left }; // N, E, S, W map to (0,1), (1,0), (0,-1), (-1,0)
+    int[] actualDirectionValues = { 1, 2, 3, 4 }; // Tile's openDirection values for N, E, S, W
+
+    // Iterate through all 4 possible rotations for the current tile
+    for (int currentRotationVal = 0; currentRotationVal < 4; currentRotationVal++)
+    {
+        List<int> currentTileRotatedOpenings = new List<int>();
+        foreach (int dir in currentTileOriginalOpenDirs)
+        {
+            currentTileRotatedOpenings.Add(((dir - 1 + currentRotationVal) % 4) + 1);
+        }
+
+        // **NEW CHECK**: If this is not the start tile, does the current tile's chosen rotation 
+        // actually allow it to accept the connection from its predecessor?
+        if (requiredIncomingDirectionForCurrentPos != 0) // 0 indicates start tile which has no predecessor constraint
+        {
+            if (!currentTileRotatedOpenings.Contains(requiredIncomingDirectionForCurrentPos))
+            {
+                continue; // This currentRotationVal is not compatible with the predecessor, try next rotation.
+            }
+        }
+
+        // Now, with the current tile in a chosen rotation (that's valid for predecessor connection),
+        // check all its potential outgoing directions to find a successor.
+        for (int i = 0; i < 4; i++) // Iterate through N, E, S, W world directions from current tile
+        {
+            int directionToNeighbor = actualDirectionValues[i]; // The specific opening direction (1-4) we are trying to connect FROM on current tile
+
+            // Does the current tile (in its current simulated rotation) open towards this neighbor direction?
+            if (currentTileRotatedOpenings.Contains(directionToNeighbor))
+            {
+                Vector2Int neighborPos = currentPos + worldDirections[i];
+
+                if (!InBounds(neighborPos) || visited.Contains(neighborPos))
+                    continue; // Neighbor is out of bounds or already visited in this specific path.
+
+                if (!originalTileOpenings.ContainsKey(neighborPos)) // Should not happen.
+                    continue;
+                
+                List<int> neighborTileOriginalOpenDirs = originalTileOpenings[neighborPos];
+                if (neighborTileOriginalOpenDirs.Count == 0) // Neighbor is an empty tile, cannot connect to it.
+                    continue; 
+
+                // Can the neighbor tile be rotated to connect back from the required incoming direction?
+                int requiredDirFromNeighborToAccept = GetOppositeDirection(directionToNeighbor);
+                if (CanTileConnectInDirection(neighborTileOriginalOpenDirs, requiredDirFromNeighborToAccept))
                 {
-                    List<int> rotatedDirs = neighborTile.openDirections
-                        .Select(d => ((d - 1 + rot) % 4) + 1)
-                        .ToList();
-                    if (rotatedDirs.Contains(oppositeDir))
+                    // If a connection is possible with this set of rotations for current and neighbor:
+                    if (TryToFindPathWithRotationsRecursive(originalTileOpenings, neighborPos, endPos, visited, requiredDirFromNeighborToAccept))
                     {
-                        canConnect = true;
-                        queue.Enqueue((neighborPos, rotatedDirs));
-                        visited.Add(neighborPos);
-                        cameFrom[neighborPos] = currentPos;
-                        break;
+                        return true; // Path found!
                     }
+                    // If recursive call didn't lead to end, this path branch failed. Loop continues to try other rotations/neighbors.
                 }
-            }
-            else if (neighborDirs.Contains(oppositeDir))
-            {
-                canConnect = true;
-                queue.Enqueue((neighborPos, neighborDirs));
-                visited.Add(neighborPos);
-                cameFrom[neighborPos] = currentPos;
-            }
-
-            if (!canConnect)
-            {
-                Debug.LogWarning($"Cannot connect from {currentPos} (dir {dir}) to {neighborPos} (needs {oppositeDir})");
             }
         }
     }
 
-    // Log the path attempted for debugging
-    Debug.LogWarning("No valid path found. Attempted positions: " + string.Join(", ", visited));
+    visited.Remove(currentPos); // Backtrack: unmark currentPos as visited for other path explorations from its predecessor
     return false;
 }
 
@@ -2202,12 +2413,12 @@ private List<Vector2Int> BuildPath(Vector2Int start, Vector2Int end)
 #if UNITY_EDITOR
                 go = UnityEditor.PrefabUtility.InstantiatePrefab(tilePlan.prefab, container) as GameObject;
                 go.transform.position = new Vector3(tilePlan.position.x * spacing, 0, tilePlan.position.y * spacing);
-                //go.transform.rotation = tileRotation;
+                go.transform.rotation = tileRotation;  // Always apply rotation
 #else
                 go = Instantiate(
                     tilePlan.prefab,
                     new Vector3(tilePlan.position.x * spacing, 0, tilePlan.position.y * spacing),
-                    tilePlan.prefab.transform.rotation,
+                    tileRotation,
                     container
                 );
 #endif
@@ -2219,6 +2430,23 @@ private List<Vector2Int> BuildPath(Vector2Int start, Vector2Int end)
                 {
                     Debug.LogError($"Tile component missing on prefab: {tilePlan.prefab.name}");
                     continue;
+                }
+                
+                // IMPORTANT: Update the tile's openDirections based on rotation
+                if (tile.openDirections != null && tile.openDirections.Count > 0)
+                {
+                    int rotationAngle = Mathf.RoundToInt(tileRotation.eulerAngles.y / 90) % 4;
+                    if (rotationAngle > 0)
+                    {
+                        List<int> rotatedDirs = new List<int>();
+                        foreach (int dir in tile.openDirections)
+                        {
+                            // Apply rotation to each direction
+                            int rotatedDir = ((dir - 1 + rotationAngle) % 4) + 1;
+                            rotatedDirs.Add(rotatedDir);
+                        }
+                        tile.openDirections = rotatedDirs;
+                    }
                 }
                 
                 // Add to grid and list
@@ -2257,6 +2485,12 @@ private List<Vector2Int> BuildPath(Vector2Int start, Vector2Int end)
             
             // Assign neighbors
             AssignNeighbors();
+            
+            // Ensure level is solvable
+            if (!ValidateLevelSolvability())
+            {
+                Debug.LogWarning("Level was not solvable after creation! You may need to verify the level design.");
+            }
             
             // Notify LevelManager about start and end tiles
             var levelManager = FindObjectOfType<LevelManager>();
