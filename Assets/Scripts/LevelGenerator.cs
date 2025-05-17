@@ -46,7 +46,7 @@ public class LevelGenerator : MonoBehaviour
     private float deadEndProbability;
     private float misleadingPathProbability;
     private int maxPathLength;
-    private float complexityFactor;
+    private float pathStraightnessBias; // New
     
     // Critical path tracking
     private List<Vector2Int> criticalPath;
@@ -417,9 +417,16 @@ public class LevelGeneratorEditor : Editor
     private void IdentifyKeyTiles(List<Vector2Int> mainPath, List<Vector2Int> keyTiles)
     {
         int keyTileCount = Mathf.RoundToInt(Mathf.Lerp(2, 8, (difficultyRating - 1) / 9f));
-        Debug.Log($"Planning to create {keyTileCount} key tiles");
+        // For very high difficulty, ensure more key tiles if the path is long enough
+        if (difficultyRating >= 9 && mainPath.Count > 15) {
+            keyTileCount = Mathf.Max(keyTileCount, Mathf.RoundToInt(Mathf.Lerp(5, 10, (difficultyRating - 8) / 2f))); // Scale from 5 up to 10 for diff 9-10
+        }
+        keyTileCount = Mathf.Min(keyTileCount, mainPath.Count - 2); // Cannot have more key tiles than path segments minus start/end
+        if (keyTileCount < 0) keyTileCount = 0;
 
-        if (mainPath.Count <= 2)
+        Debug.Log($"Planning to create {keyTileCount} key tiles for difficulty {difficultyRating}");
+
+        if (mainPath.Count <= 2 || keyTileCount == 0) // Added keyTileCount == 0 check
             return;
 
         HashSet<int> keyIndices = new HashSet<int>();
@@ -444,63 +451,148 @@ public class LevelGeneratorEditor : Editor
     // Create gaps in the critical path for key tiles
     private void CreateGapsForKeyTiles(Dictionary<Vector2Int, List<int>> planningGrid, List<Vector2Int> keyTiles)
     {
-        // Only applicable at higher difficulties
+        // Only applicable at higher difficulties and if there are key tiles
         if (difficultyRating < 4 || keyTiles == null || keyTiles.Count == 0)
             return;
+            
+        int maxRemovedTiles = 0;
+        if (difficultyRating == 10) maxRemovedTiles = Mathf.Min(keyTiles.Count > 0 ? keyTiles.Count - 1 : 0, Mathf.CeilToInt(keyTiles.Count * 0.8f));
+        else if (difficultyRating == 9) maxRemovedTiles = Mathf.Min(keyTiles.Count > 0 ? keyTiles.Count - 1 : 0, Mathf.CeilToInt(keyTiles.Count * 0.6f));
+        else if (difficultyRating >= 8) maxRemovedTiles = Mathf.Min(keyTiles.Count > 0 ? keyTiles.Count - 1 : 0, Mathf.CeilToInt(keyTiles.Count * 0.5f));
+        else if (difficultyRating >= 4) maxRemovedTiles = Mathf.Min(keyTiles.Count > 0 ? keyTiles.Count - 1 : 0, Mathf.CeilToInt(keyTiles.Count * 0.3f));
+        if (maxRemovedTiles < 0) maxRemovedTiles = 0;
+
+        int actualRemovedCount = 0; // Running count of tiles whose connections are completely emptied
             
         // For each key tile, modify its connections to create a gap in the path
         foreach (var pos in keyTiles)
         {
             if (planningGrid.ContainsKey(pos))
             {
-                // For higher difficulties, we might completely remove the tile
-                // But limit the maximum number of removed tiles based on difficulty
-                int maxRemovedTiles = Mathf.Min(keyTiles.Count - 1, difficultyRating / 2);
-                int currentRemovedTiles = planningGrid.Count(p => keyTiles.Contains(p.Key) && p.Value.Count == 0);
-                
-                // Only remove if we haven't exceeded our limit and it's not the last key tile
-                if (difficultyRating >= 8 && Random.value < 0.7f && currentRemovedTiles < maxRemovedTiles)
-                {
-                    // We'll modify the connections rather than completely removing
-                    planningGrid[pos] = new List<int>(); // Empty list instead of removing
-                    Debug.Log($"Emptied key tile at {pos} to create a gap in the critical path");
+                float attemptEmptyChance = 0.0f;
+                float attemptReduceChance = 0.0f;
+
+                if (difficultyRating == 10) {
+                    attemptEmptyChance = 0.9f; 
+                    attemptReduceChance = 1.0f; 
+                } else if (difficultyRating == 9) {
+                    attemptEmptyChance = 0.75f;
+                    attemptReduceChance = 0.9f;
+                } else if (difficultyRating >= 8) { // difficultyRating == 8
+                    attemptEmptyChance = 0.6f;
+                    attemptReduceChance = 0.8f;
+                } else if (difficultyRating >= 4) { // difficultyRating 4-7
+                    attemptEmptyChance = 0.4f; 
+                    attemptReduceChance = 0.7f;
                 }
-                // Or we might reduce its connections
-                else if (planningGrid[pos].Count > 2)
+
+                bool emptiedThisTile = false;
+                // Try to empty the tile's connections
+                if (actualRemovedCount < maxRemovedTiles && Random.value < attemptEmptyChance && planningGrid[pos].Count > 0) // Also check if it has connections to remove
                 {
-                    // Reduce to just two directions (making it a straight piece that needs correct rotation)
-                    List<int> originalDirs = new List<int>(planningGrid[pos]);
-                    planningGrid[pos].Clear();
-                    
-                    // Keep just two random directions to force a specific orientation
-                    int dir1Index = Random.Range(0, originalDirs.Count);
-                    int dir1 = originalDirs[dir1Index];
-                    planningGrid[pos].Add(dir1);
-                    
-                    // Try to find a non-opposite direction for the second connection
-                    for (int i = 0; i < originalDirs.Count; i++)
+                    planningGrid[pos] = new List<int>(); // Empty it
+                    Debug.Log($"Emptied key tile at {pos} for difficulty {difficultyRating}. (Removed: {actualRemovedCount + 1}/{maxRemovedTiles})");
+                    emptiedThisTile = true;
+                    actualRemovedCount++;
+                }
+
+                // If not emptied, and it has more than 1 connection, try to reduce its connections
+                if (!emptiedThisTile && planningGrid[pos].Count > 1 && Random.value < attemptReduceChance)
+                {
+                    // Only reduce if it currently has more than 2 connections, aiming to make it a 2-connection (straight/corner)
+                    if (planningGrid[pos].Count > 2) 
                     {
-                        if (i != dir1Index && Mathf.Abs(originalDirs[i] - dir1) != 2)
+                        List<int> originalDirs = new List<int>(planningGrid[pos]); // These are the connections vital for the current critical path plan
+                        planningGrid[pos].Clear();
+                        
+                        if (difficultyRating >= 9 && originalDirs.Count >= 2) // Special handling for Diff 9 & 10 to force specific straights or corners
                         {
-                            planningGrid[pos].Add(originalDirs[i]);
-                            break;
-                        }
-                    }
-                    
-                    // If we couldn't find a non-opposite direction, add any other direction
-                    if (planningGrid[pos].Count < 2 && originalDirs.Count > 1)
-                    {
-                        for (int i = 0; i < originalDirs.Count; i++)
-                        {
-                            if (i != dir1Index)
-                            {
-                                planningGrid[pos].Add(originalDirs[i]);
-                                break;
+                            bool madeStraight = false;
+                            // Try to force a specific straight connection if possible from originalDirs
+                            for (int j = 0; j < originalDirs.Count; j++) {
+                                for (int k = j + 1; k < originalDirs.Count; k++) {
+                                    if (Mathf.Abs(originalDirs[j] - originalDirs[k]) == 2) { // Opposite directions
+                                        planningGrid[pos].Add(originalDirs[j]);
+                                        planningGrid[pos].Add(originalDirs[k]);
+                                        Debug.Log($"FORCED key tile {pos} to a specific STRAIGHT with dirs {originalDirs[j]},{originalDirs[k]} (was {originalDirs.Count}) for difficulty {difficultyRating}");
+                                        madeStraight = true;
+                                        break;
+                                    }
+                                }
+                                if (madeStraight) break;
+                            }
+
+                            if (!madeStraight) { // Could not force a straight, so force a specific corner
+                                if (originalDirs.Count >= 2) {
+                                    // Pick the first two (potentially shuffled) non-opposite original connections to form a corner
+                                    List<int> shuffledOriginalDirs = originalDirs.OrderBy(a => Random.value).ToList();
+                                    int dir1 = -1, dir2 = -1;
+                                    for(int j=0; j < shuffledOriginalDirs.Count; ++j) {
+                                        for (int k=j+1; k < shuffledOriginalDirs.Count; ++k) {
+                                            if (Mathf.Abs(shuffledOriginalDirs[j] - shuffledOriginalDirs[k]) != 2) {
+                                                dir1 = shuffledOriginalDirs[j];
+                                                dir2 = shuffledOriginalDirs[k];
+                                                break;
+                                            }
+                                        }
+                                        if (dir1 != -1) break;
+                                    }
+                                    if (dir1 != -1 && dir2 != -1) {
+                                        planningGrid[pos].Add(dir1);
+                                        planningGrid[pos].Add(dir2);
+                                        Debug.Log($"FORCED key tile {pos} to a specific CORNER with dirs {dir1},{dir2} (was {originalDirs.Count}) for difficulty {difficultyRating}");
+                                    } else if (originalDirs.Count >= 1) { // Fallback if somehow still no pair, just take the first (should be rare)
+                                         planningGrid[pos].Add(originalDirs[0]); // This will likely become a 1-connection dead-end piece
+                                         if(originalDirs.Count >=2) planningGrid[pos].Add(originalDirs[1]); // take two if available.
+                                         Debug.Log($"Reduced key tile {pos} (fallback) to dirs {string.Join(",", planningGrid[pos])} (was {originalDirs.Count}) for difficulty {difficultyRating}");
+                                    }
+                                } else if (originalDirs.Count == 1) { // If original was only 1 connection, keep it
+                                     planningGrid[pos].Add(originalDirs[0]);
+                                     Debug.Log($"Kept key tile {pos} as ONE dir {originalDirs[0]} (was {originalDirs.Count}) for difficulty {difficultyRating}");
+                                }
+                            }
+                        } 
+                        else // Logic for difficulties 4-8 (less strict reduction)
+                        { 
+                            List<int> shuffledOriginalDirs = originalDirs.OrderBy(a => Random.value).ToList();
+                            int dir1 = -1, dir2 = -1;
+
+                            // Try to find a pair that forms a corner from the original connections
+                            foreach (int firstChoice in shuffledOriginalDirs) {
+                                foreach (int secondChoice in originalDirs) { 
+                                    if (firstChoice == secondChoice) continue;
+                                    if (Mathf.Abs(firstChoice - secondChoice) != 2) { 
+                                        dir1 = firstChoice;
+                                        dir2 = secondChoice;
+                                        break;
+                                    }
+                                }
+                                if (dir1 != -1) break; 
+                            }
+
+                            if (dir1 != -1 && dir2 != -1) { 
+                                planningGrid[pos].Add(dir1);
+                                planningGrid[pos].Add(dir2);
+                                Debug.Log($"Reduced key tile {pos} to a CORNER with dirs {dir1},{dir2} (was {originalDirs.Count}) for difficulty {difficultyRating}");
+                            } else if (originalDirs.Count >= 2) { 
+                                planningGrid[pos].Add(originalDirs[0]);
+                                planningGrid[pos].Add(originalDirs[1]);
+                                Debug.Log($"Reduced key tile {pos} to a STRAIGHT with dirs {originalDirs[0]},{originalDirs[1]} (was {originalDirs.Count}) for difficulty {difficultyRating}");
+                            } else if (originalDirs.Count == 1) { 
+                                 planningGrid[pos].Add(originalDirs[0]);
+                                 Debug.Log($"Reduced key tile {pos} to ONE dir {originalDirs[0]} (was {originalDirs.Count}) for difficulty {difficultyRating}");
                             }
                         }
+                        // Ensure we don't have more than 2 connections if reduction happened and wasn't a single kept dir.
+                        if(planningGrid[pos].Count > 2) { // If forced logic resulted in >2 (should not happen with current code)
+                            Debug.LogWarning($"Key tile {pos} reduction resulted in >2 connections. Trimming to 2.");
+                            while(planningGrid[pos].Count > 2) planningGrid[pos].RemoveAt(planningGrid[pos].Count -1);
+                        }
+                        if(planningGrid[pos].Count == 0 && originalDirs.Count > 0) { // Safety: if it became empty but wasn't, restore one dir
+                            Debug.LogWarning($"Key tile {pos} reduction resulted in 0 connections. Restoring first original dir.");
+                            planningGrid[pos].Add(originalDirs[0]);
+                        }
                     }
-                    
-                    Debug.Log($"Modified key tile at {pos}: reduced connections from {originalDirs.Count} to {planningGrid[pos].Count}");
                 }
             }
         }
@@ -667,7 +759,14 @@ public class LevelGeneratorEditor : Editor
         deadEndProbability = Mathf.Lerp(0.05f, 0.7f, (difficultyRating - 1) / 9f);          // Increase dead end probability
         misleadingPathProbability = Mathf.Lerp(0.1f, 0.8f, (difficultyRating - 1) / 9f);    // Increase deceptive path probability
         maxPathLength = Mathf.RoundToInt(Mathf.Lerp(width + height, (width + height) * 2.5f, (difficultyRating - 1) / 9f));
-        complexityFactor = Mathf.Lerp(1f, 3.5f, (difficultyRating - 1) / 9f);
+        
+        if (difficultyRating == 10) {
+            pathStraightnessBias = 0.20f;
+        } else if (difficultyRating == 9) {
+            pathStraightnessBias = 0.30f;
+        } else {
+            pathStraightnessBias = Mathf.Lerp(0.95f, 0.40f, (difficultyRating - 1) / 9f); 
+        }
         
         // New parameters for improved difficulty scaling
         int criticalTileCount = Mathf.RoundToInt(Mathf.Lerp(1, 5, (difficultyRating - 1) / 9f));
@@ -680,7 +779,7 @@ public class LevelGeneratorEditor : Editor
         Debug.Log($"Difficulty parameters - Dead ends: {deadEndProbability:F2}, " +
                   $"Deceptive paths: {misleadingPathProbability:F2}, " +
                   $"Max path length: {maxPathLength}, " +
-                  $"Complexity factor: {complexityFactor:F2}, " +
+                  $"Path Straightness Bias: {pathStraightnessBias:F2}, " + // New
                   $"Critical tiles: {criticalTileCount}, " +
                   $"Max valid paths: {maxValidPathsAllowed}");
     }
@@ -1020,10 +1119,12 @@ private int GetDirection(Vector2Int from, Vector2Int to)
     
     private void GenerateDeceptivePaths(List<List<Vector2Int>> allPaths, List<Vector2Int> mainPath)
     {
-        int deceptivePathCount = Mathf.RoundToInt(Mathf.Lerp(2, 10, (difficultyRating - 1) / 9f));
-        deceptivePathCount = Mathf.Min(deceptivePathCount, mainPath.Count - 2);
+        // int deceptivePathCount = Mathf.RoundToInt(Mathf.Lerp(2, 10, (difficultyRating - 1) / 9f)); // Old
+        int deceptivePathCount = Mathf.RoundToInt(Mathf.Lerp(2, 15, (difficultyRating - 1) / 9f)); // New: up to 15
+        deceptivePathCount = Mathf.Min(deceptivePathCount, mainPath.Count > 1 ? mainPath.Count - 2 : 0); // Ensure it's not negative or too large for short paths
+        if (deceptivePathCount < 0) deceptivePathCount = 0;
 
-        Debug.Log($"Creating {deceptivePathCount} deceptive paths");
+        Debug.Log($"Creating {deceptivePathCount} deceptive paths for difficulty {difficultyRating}");
 
         HashSet<int> usedIndices = new HashSet<int>();
         for (int i = 0; i < deceptivePathCount; i++)
@@ -1109,7 +1210,7 @@ private int GetDirection(Vector2Int from, Vector2Int to)
     
     private List<Vector2Int> BuildDeceptivePath(Vector2Int start, Vector2Int target)
     {
-        float windingFactor = Mathf.Lerp(0.3f, 0.95f, (difficultyRating - 1) / 9f);
+        float windingFactor = Mathf.Lerp(0.3f, 0.95f, (difficultyRating - 1) / 9f); // This can still be used for other heuristics if needed
         int minLength = Mathf.RoundToInt(Mathf.Lerp(5, 15, (difficultyRating - 1) / 9f));
         int maxIterations = maxPathLength;
 
@@ -1119,7 +1220,8 @@ private int GetDirection(Vector2Int from, Vector2Int to)
 
         while (iteration < maxIterations)
         {
-            bool directPath = Random.value > windingFactor && path.Count > minLength;
+            // bool directPath = Random.value > windingFactor && path.Count > minLength; // Old logic
+            bool directPath = Random.value < pathStraightnessBias; // New logic, consistent with BuildPath
             Vector2Int next;
 
             if (directPath)
@@ -1590,7 +1692,7 @@ private bool ValidateLevelSolvability()
     if (isExhaustivelySolvable)
     {
         Debug.Log("Level IS solvable with proper tile rotations (exhaustive check passed)!");
-        return true;
+            return true;
     }
     else
     {
@@ -1609,7 +1711,7 @@ private bool HasConnectedPathNonEmptyTiles(Tile[,] currentGrid, Vector2Int start
             potentialConnections[y, x] = new bool[4];
             Tile tile = currentGrid[y, x];
             if (tile == null || tile.openDirections == null || tile.openDirections.Count == 0)
-                continue; 
+            continue;
             potentialConnections[y, x][0] = true;
             potentialConnections[y, x][1] = true;
             potentialConnections[y, x][2] = true;
@@ -1638,7 +1740,7 @@ private bool HasPathWithPotentialConnections(bool[,][] potentialConnections, Vec
             if (!InBounds(neighbor) || visited.Contains(neighbor)) continue;
             Tile neighborTile = grid[neighbor.y, neighbor.x]; 
             if (neighborTile == null || neighborTile.openDirections == null || neighborTile.openDirections.Count == 0)
-                 continue; 
+                continue;
             int oppositeDirIndex = (i + 2) % 4;
             if (!potentialConnections[neighbor.y, neighbor.x][oppositeDirIndex]) continue;
             queue.Enqueue(neighbor);
@@ -1745,9 +1847,9 @@ private bool CanTileConnectInDirection(List<int> originalOpenDirs, int requiredD
             if (rotatedDir == requiredDirection)
             {
                 canConnectThisRotation = true;
-                break;
-            }
-        }
+                        break;
+                    }
+                }
         if (canConnectThisRotation) return true;
     }
     return false;
@@ -2546,7 +2648,8 @@ private List<Vector2Int> BuildPath(Vector2Int start, Vector2Int end)
     private void PlanDeadEnds(Dictionary<Vector2Int, List<int>> planningGrid)
     {
         Debug.Log("Planning dead ends...");
-        int deadEndCount = Mathf.RoundToInt(Mathf.Lerp(5, 20, (difficultyRating - 1) / 9f));
+        // int deadEndCount = Mathf.RoundToInt(Mathf.Lerp(5, 20, (difficultyRating - 1) / 9f)); // Old
+        int deadEndCount = Mathf.RoundToInt(Mathf.Lerp(5, 30, (difficultyRating - 1) / 9f)); // New: up to 30
         int placedDeadEnds = 0;
         int maxAttempts = deadEndCount * 5;
 
@@ -2581,14 +2684,47 @@ private List<Vector2Int> BuildPath(Vector2Int start, Vector2Int end)
     private void PlanRemainingTiles(Dictionary<Vector2Int, List<int>> planningGrid)
     {
         // Adjust tile distribution based on difficulty
-        float emptyChance = Mathf.Lerp(0.3f, 0.5f, (difficultyRating - 1) / 9f);       
-        float straightChance = Mathf.Lerp(0.3f, 0.3f, (difficultyRating - 1) / 9f);   
-        float cornerChance = Mathf.Lerp(0.25f, 0.15f, (difficultyRating - 1) / 9f);    
-        float tChance = Mathf.Lerp(0.12f, 0.04f, (difficultyRating - 1) / 9f);         
-        float crossChance = Mathf.Lerp(0.03f, 0.01f, (difficultyRating - 1) / 9f);      
+        float baseEmptyChance;
+        if (difficultyRating == 10) {
+            baseEmptyChance = 0.05f; // Very few empty tiles
+        } else if (difficultyRating == 9) {
+            baseEmptyChance = 0.10f; // Few empty tiles
+        } else {
+            baseEmptyChance = Mathf.Lerp(0.6f, 0.15f, (difficultyRating - 1) / 8f); // Adjusted to prevent 0.1 at diff 8 matching diff 9 if not careful with Lerp range
+        }
         
-        Debug.Log($"Tile distribution - Empty: {emptyChance:F2}, Straight: {straightChance:F2}, " +
-                  $"Corner: {cornerChance:F2}, T: {tChance:F2}, Cross: {crossChance:F2}");
+        // Proportional factors for other tiles (should sum to 1.0)
+        float straightChanceFactor;
+        float cornerChanceFactor;
+        float tChanceFactor;
+        float crossChanceFactor;
+
+        if (difficultyRating >= 9) { // For difficulty 9 and 10, prioritize complex tiles
+            straightChanceFactor = 0.20f; 
+            cornerChanceFactor = 0.25f;
+            tChanceFactor = 0.30f;
+            crossChanceFactor = 0.25f; // High chance for T and Cross
+        } else if (difficultyRating >= 7) { // For difficulty 7 and 8
+            straightChanceFactor = 0.30f; 
+            cornerChanceFactor = 0.30f;
+            tChanceFactor = 0.25f;
+            crossChanceFactor = 0.15f;
+        } else { // For difficulties 1-6
+            straightChanceFactor = 0.45f; 
+            cornerChanceFactor = 0.35f;
+            tChanceFactor = 0.15f;
+            crossChanceFactor = 0.05f; 
+        }
+
+        float remainingSpaceChance = 1.0f - baseEmptyChance;
+        float actualStraightChance = remainingSpaceChance * straightChanceFactor;
+        float actualCornerChance = remainingSpaceChance * cornerChanceFactor;
+        float actualTChance = remainingSpaceChance * tChanceFactor;
+        float actualCrossChance = remainingSpaceChance * crossChanceFactor; // or remainingSpaceChance * (1 - (straight + corner + t)) for precision
+        
+        Debug.Log($"Tile distribution (Difficulty: {difficultyRating}) - BaseEmpty: {baseEmptyChance:F2}, " +
+                  $"ActualStraight: {actualStraightChance:F2}, ActualCorner: {actualCornerChance:F2}, " +
+                  $"ActualT: {actualTChance:F2}, ActualCross: {actualCrossChance:F2}");
         
         // Check for reserved positions (key tiles)
         HashSet<Vector2Int> reservedPositions = new HashSet<Vector2Int>();
@@ -2646,23 +2782,23 @@ private List<Vector2Int> BuildPath(Vector2Int start, Vector2Int end)
                 if (farFromCriticalPath)
                 {
                     // Cap maximum empty chance at 0.7 to ensure some tiles still appear
-                    emptyChance = Mathf.Min(emptyChance + 0.2f, 0.7f);
+                    baseEmptyChance = Mathf.Min(baseEmptyChance + 0.2f, 0.7f);
                 }
                 
                 // At the highest difficulties, ensure areas very far from path still have some connections
                 if (difficultyRating >= 9 && minDistance > 5)
                 {
                     // If very far from path, reduce empty chance to ensure some connections
-                    emptyChance = Mathf.Max(emptyChance - 0.2f, 0.3f);
+                    baseEmptyChance = Mathf.Max(baseEmptyChance - 0.2f, 0.3f);
                 }
             }
             
             // Determine directions based on random value
-            if (r < emptyChance)
+            if (r < baseEmptyChance)
             {
                 // Empty tile - no directions
             }
-            else if (r < emptyChance + straightChance)
+            else if (r < baseEmptyChance + actualStraightChance)
             {
                 // Straight tile - random orientation
                 if (Random.value < 0.5f)
@@ -2676,7 +2812,7 @@ private List<Vector2Int> BuildPath(Vector2Int start, Vector2Int end)
                     dirs.Add(4); // West
                 }
             }
-            else if (r < emptyChance + straightChance + cornerChance)
+            else if (r < baseEmptyChance + actualStraightChance + actualCornerChance)
             {
                 // Corner tile - random orientation
                 int firstDir = Random.Range(1, 5);
@@ -2688,7 +2824,7 @@ private List<Vector2Int> BuildPath(Vector2Int start, Vector2Int end)
                 dirs.Add(firstDir);
                 dirs.Add(secondDir);
             }
-            else if (r < emptyChance + straightChance + cornerChance + tChance)
+            else if (r < baseEmptyChance + actualStraightChance + actualCornerChance + actualTChance)
             {
                 // T tile - random orientation
                 int excludeDir = Random.Range(1, 5);
