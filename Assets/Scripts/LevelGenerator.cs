@@ -2,6 +2,10 @@
 using System.Collections.Generic;
 using UnityEngine;
 using System.Linq;
+using System;
+using Random = UnityEngine.Random;
+
+
 #if UNITY_EDITOR
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -915,7 +919,7 @@ public class LevelGeneratorEditor : Editor
     }
 
     // Helper method to safely destroy objects in both edit and play mode
-    private void SafeDestroy(Object obj)
+    private void SafeDestroy(UnityEngine.Object obj)
     {
         if (obj == null)
             return;
@@ -3060,33 +3064,56 @@ private Quaternion CalculateTileRotation(GameObject prefab, List<int> desiredDir
         mainSolutionPath = null; 
         Dictionary<Vector2Int, List<int>> originalAllTileOpenings = GetOriginalPrefabOpenings();
 
-        // 1. Find ALL valid Start-to-End paths.
-        List<SolutionPathInfo> allSEPaths = FindAllSolutionPaths(startPos, endPos, originalAllTileOpenings);
+        // 1. Find diverse set of Start-to-End paths instead of ALL paths
+        List<SolutionPathInfo> diversePaths = FindDiverseSolutionPaths(startPos, endPos, originalAllTileOpenings);
 
-        if (allSEPaths == null || allSEPaths.Count == 0)
+        if (diversePaths == null || diversePaths.Count == 0)
         {
             Debug.LogError("[CalculateMaxFillableTiles] No S-E solution paths found. Cannot calculate fill.");
             mainSolutionPath = null;
             return 0;
         }
 
-        Debug.Log($"[CalculateMaxFillableTiles] Found {allSEPaths.Count} potential S-E paths. Evaluating fill for each...");
+        Debug.Log($"[CalculateMaxFillableTiles] Found {diversePaths.Count} potential S-E paths. Evaluating fill for each...");
+
+        // 2. Calculate tile weights for more strategic fill calculation
+        Dictionary<Vector2Int, float> tileWeights = AssignTileWeights(originalAllTileOpenings);
 
         int maxOverallFillCount = 0;
+        float maxWeightedFill = 0f;
         SolutionPathInfo bestMainPathForMaxFill = null;
 
         int pathCounter = 0;
-        foreach (SolutionPathInfo pathOption in allSEPaths)
+        foreach (SolutionPathInfo pathOption in diversePaths)
         {
             pathCounter++;
-            // Debug.Log($"[CalculateMaxFillableTiles] Evaluating S-E path option {pathCounter}/{allSEPaths.Count}...");
-            int currentPathFillCount = ExploreFillFromPath(pathOption, originalAllTileOpenings);
-            // Debug.Log($"[CalculateMaxFillableTiles] S-E path option {pathCounter} resulted in a fill count of {currentPathFillCount}.");
+            Debug.Log($"[CalculateMaxFillableTiles] Evaluating S-E path option {pathCounter}/{diversePaths.Count}...");
 
-            if (currentPathFillCount > maxOverallFillCount)
+            // 3. First do basic exploration of this path
+            HashSet<Vector2Int> filledTiles = new HashSet<Vector2Int>();
+            Dictionary<Vector2Int, int> finalRotations = new Dictionary<Vector2Int, int>();
+            int basicFillCount = ExploreFillFromPath(pathOption, originalAllTileOpenings, filledTiles, finalRotations);
+            
+            // 4. Then further optimize the result with iterative improvement
+            int improvedFillCount = ImprovePathFill(filledTiles, finalRotations, originalAllTileOpenings);
+            
+            // 5. Calculate weighted fill value for this option
+            float weightedFill = CalculateWeightedFill(filledTiles, tileWeights);
+            
+            Debug.Log($"[CalculateMaxFillableTiles] S-E path option {pathCounter} resulted in fill: Basic={basicFillCount}, Improved={improvedFillCount}, Weighted={weightedFill:F2}");
+
+            // 6. Keep track of the best result
+            if (improvedFillCount > maxOverallFillCount || 
+                (improvedFillCount == maxOverallFillCount && weightedFill > maxWeightedFill))
             {
-                maxOverallFillCount = currentPathFillCount;
-                bestMainPathForMaxFill = pathOption;
+                maxOverallFillCount = improvedFillCount;
+                maxWeightedFill = weightedFill;
+                
+                // Create a solution path with the improved rotations
+                bestMainPathForMaxFill = new SolutionPathInfo(
+                    new List<Vector2Int>(pathOption.PathPositions),
+                    new Dictionary<Vector2Int, int>(finalRotations)
+                );
             }
         }
         
@@ -3094,12 +3121,12 @@ private Quaternion CalculateTileRotation(GameObject prefab, List<int> desiredDir
 
         if (mainSolutionPath != null)
         {
-            Debug.Log($"[CalculateMaxFillableTiles] Max fill count: {maxOverallFillCount} (achieved with S-E path of {mainSolutionPath.PathPositions.Count} tiles).");
+            Debug.Log($"[CalculateMaxFillableTiles] Max fill count: {maxOverallFillCount} (weighted: {maxWeightedFill:F2}, achieved with S-E path of {mainSolutionPath.PathPositions.Count} tiles).");
         }
         else
         {
-            // Should not happen if allSEPaths was not empty, but as a fallback.
-            Debug.LogWarning($"[CalculateMaxFillableTiles] Max fill count: {maxOverallFillCount}, but no specific S-E path was determined as best (this might indicate an issue or only one S-E path found).");
+            // Should not happen if diversePaths was not empty, but as a fallback.
+            Debug.LogWarning($"[CalculateMaxFillableTiles] Max fill count: {maxOverallFillCount}, but no specific S-E path was determined as best (this might indicate an issue).");
         }
         
         return maxOverallFillCount;
@@ -3132,146 +3159,314 @@ private Quaternion CalculateTileRotation(GameObject prefab, List<int> desiredDir
     private List<SolutionPathInfo> FindAllSolutionPaths(Vector2Int startNode, Vector2Int endNode, Dictionary<Vector2Int, List<int>> originalAllTileOpenings)
     {
         List<SolutionPathInfo> allFoundPaths = new List<SolutionPathInfo>();
-        FindAllSolutionPathsRecursive(
-            originalAllTileOpenings,
-            startNode,
-            endNode,
-            new HashSet<Vector2Int>(), // visitedInCurrentPath
-            allFoundPaths,             // list to populate
-            0,                         // requiredIncomingDirectionForCurrentPos (0 for start)
-            new List<Vector2Int>(),    // currentAccumulatedPath
-            new Dictionary<Vector2Int, int>() // currentAccumulatedRotations
-        );
 
         Debug.Log($"[FindAllSolutionPaths] Found {allFoundPaths.Count} potential S-E solution paths between {startNode} and {endNode}.");
         return allFoundPaths;
     }
 
-    private void FindAllSolutionPathsRecursive(
-        Dictionary<Vector2Int, List<int>> originalTileOpenings,
-        Vector2Int currentPos,
-        Vector2Int endPos,
-        HashSet<Vector2Int> visitedInCurrentPath, 
-        List<SolutionPathInfo> allFoundPaths,
-        int requiredIncomingDirectionForCurrentPos, 
-        List<Vector2Int> currentAccumulatedPath,
-        Dictionary<Vector2Int, int> currentAccumulatedRotations)
+    // Optimized method to find a diverse set of promising solution paths
+    private List<SolutionPathInfo> FindDiverseSolutionPaths(Vector2Int startNode, Vector2Int endNode, Dictionary<Vector2Int, List<int>> originalAllTileOpenings)
     {
-        // Add current position to the path and mark as visited for this specific path attempt
-        currentAccumulatedPath.Add(currentPos);
-        visitedInCurrentPath.Add(currentPos);
-
-        if (currentPos == endPos)
+        List<SolutionPathInfo> diversePaths = new List<SolutionPathInfo>();
+        int maxPathsToFind = Mathf.Min(10, (width + height)); // Cap to avoid excessive computation
+        
+        // Find shortest path (direct)
+        SolutionPathInfo shortestPath = TryToFindOneSolutionPathRecursive(
+            originalAllTileOpenings, 
+            startNode, 
+            endNode, 
+            new HashSet<Vector2Int>(), 
+            0, 
+            new List<Vector2Int>(), 
+            new Dictionary<Vector2Int, int>()
+        );
+        
+        if (shortestPath != null)
         {
-            // Found a complete path to the end
-            // Create new instances for the path and rotations to store them independently
-            allFoundPaths.Add(new SolutionPathInfo(
-                new List<Vector2Int>(currentAccumulatedPath),
-                new Dictionary<Vector2Int, int>(currentAccumulatedRotations)
-            ));
-            // Backtrack to allow exploring other branches
-            visitedInCurrentPath.Remove(currentPos);
-            currentAccumulatedPath.RemoveAt(currentAccumulatedPath.Count - 1);
-            return; // Stop this branch of recursion
+            diversePaths.Add(shortestPath);
+            Debug.Log($"[FindDiverseSolutionPaths] Found shortest path with {shortestPath.PathPositions.Count} tiles");
         }
-
-        // Get original openings for the current tile
-        if (!originalTileOpenings.TryGetValue(currentPos, out List<int> currentTileOriginalOpenDirs) || currentTileOriginalOpenDirs == null || currentTileOriginalOpenDirs.Count == 0)
+        else
         {
-            // Current tile is empty or has no openings, cannot continue path from here
-            visitedInCurrentPath.Remove(currentPos);
-            currentAccumulatedPath.RemoveAt(currentAccumulatedPath.Count - 1);
-            return;
+            Debug.LogWarning("[FindDiverseSolutionPaths] Failed to find shortest path");
         }
-
-        Vector2Int[] worldDirections = { Vector2Int.up, Vector2Int.right, Vector2Int.down, Vector2Int.left };
-        int[] actualDirectionValues = { 1, 2, 3, 4 }; // N, E, S, W
-
-        // Try all 4 possible rotations for the current tile
-        for (int currentRotationVal = 0; currentRotationVal < 4; currentRotationVal++)
+        
+        // Find paths that maximize branching potential 
+        SolutionPathInfo branchingPath = FindBranchingPath(startNode, endNode, originalAllTileOpenings);
+        if (branchingPath != null && !PathsAreEqual(branchingPath, shortestPath))
         {
-            List<int> currentTileRotatedOpenings = new List<int>();
-            foreach (int dir in currentTileOriginalOpenDirs)
+            diversePaths.Add(branchingPath);
+            Debug.Log($"[FindDiverseSolutionPaths] Found branching path with {branchingPath.PathPositions.Count} tiles");
+        }
+        
+        // Find a path with maximized coverage of key/critical tiles
+        SolutionPathInfo keyTilePath = FindKeyTilePath(startNode, endNode, originalAllTileOpenings);
+        if (keyTilePath != null && !diversePaths.Any(p => PathsAreEqual(p, keyTilePath)))
+        {
+            diversePaths.Add(keyTilePath);
+            Debug.Log($"[FindDiverseSolutionPaths] Found key tile path with {keyTilePath.PathPositions.Count} tiles");
+        }
+        
+        // If we still need more paths, find some random ones
+        if (diversePaths.Count < maxPathsToFind)
+        {
+            int additionalPathsNeeded = maxPathsToFind - diversePaths.Count;
+            int maxAttempts = additionalPathsNeeded * 2;
+            int attempts = 0;
+            
+            while (diversePaths.Count < maxPathsToFind && attempts < maxAttempts)
             {
-                currentTileRotatedOpenings.Add(((dir - 1 + currentRotationVal) % 4) + 1);
-            }
-
-            // Check if this rotation is compatible with the required incoming direction (if not start tile)
-            if (requiredIncomingDirectionForCurrentPos != 0)
-            {
-                if (!currentTileRotatedOpenings.Contains(requiredIncomingDirectionForCurrentPos))
+                attempts++;
+                SolutionPathInfo randomPath = FindRandomizedPath(startNode, endNode, originalAllTileOpenings);
+                
+                if (randomPath != null && !diversePaths.Any(p => PathsAreEqual(p, randomPath)))
                 {
-                    continue; // This rotation is not valid for the incoming path, try next rotation
+                    diversePaths.Add(randomPath);
+                    Debug.Log($"[FindDiverseSolutionPaths] Found randomized path #{diversePaths.Count} with {randomPath.PathPositions.Count} tiles");
                 }
             }
+        }
+        
+        Debug.Log($"[FindDiverseSolutionPaths] Found {diversePaths.Count} diverse solution paths between {startNode} and {endNode}.");
+        return diversePaths;
+    }
 
-            // Temporarily fix this rotation for the current tile for this path branch
-            currentAccumulatedRotations[currentPos] = currentRotationVal;
-
-            // Explore neighbors
-            for (int i = 0; i < 4; i++) // Iterate N, E, S, W
+    // Helper method to find a path that prioritizes tiles with more connections
+    private SolutionPathInfo FindBranchingPath(Vector2Int startNode, Vector2Int endNode, Dictionary<Vector2Int, List<int>> originalAllTileOpenings)
+    {
+        // This method will use a modified version of the existing TryToFindOneSolutionPathRecursive
+        // but with a bias toward tiles with more connections
+        
+        // Create a set of tiles to prioritize
+        HashSet<Vector2Int> highConnectionTiles = new HashSet<Vector2Int>();
+        foreach (var entry in originalAllTileOpenings)
+        {
+            if (entry.Value.Count >= 3 && entry.Key != startNode && entry.Key != endNode)
             {
-                int directionToNeighbor = actualDirectionValues[i];
-                if (currentTileRotatedOpenings.Contains(directionToNeighbor))
+                highConnectionTiles.Add(entry.Key);
+            }
+        }
+        
+        // Use our existing method but pass in additional context
+        return FindBiasedPath(startNode, endNode, originalAllTileOpenings, highConnectionTiles);
+    }
+
+    // Helper method to find a path that covers key tiles
+    private SolutionPathInfo FindKeyTilePath(Vector2Int startNode, Vector2Int endNode, Dictionary<Vector2Int, List<int>> originalAllTileOpenings)
+    {
+        // Prioritize key tiles and tiles on the critical path
+        HashSet<Vector2Int> priorityTiles = new HashSet<Vector2Int>();
+        
+        // Add key tiles if they exist
+        if (keyTilePositions != null && keyTilePositions.Count > 0)
+        {
+            foreach (var pos in keyTilePositions)
+            {
+                priorityTiles.Add(pos);
+            }
+        }
+        
+        // Add critical path tiles if they exist
+        if (criticalPath != null && criticalPath.Count > 0)
+        {
+            foreach (var pos in criticalPath)
+            {
+                if (pos != startNode && pos != endNode)
                 {
-                    Vector2Int neighborPos = currentPos + worldDirections[i];
+                    priorityTiles.Add(pos);
+                }
+            }
+        }
+        
+        // If no priority tiles, just use the default path finding
+        if (priorityTiles.Count == 0)
+        {
+            return TryToFindOneSolutionPathRecursive(
+                originalAllTileOpenings, 
+                startNode, 
+                endNode, 
+                new HashSet<Vector2Int>(), 
+                0, 
+                new List<Vector2Int>(), 
+                new Dictionary<Vector2Int, int>()
+            );
+        }
+        
+        return FindBiasedPath(startNode, endNode, originalAllTileOpenings, priorityTiles);
+    }
 
-                    if (InBounds(neighborPos) && !visitedInCurrentPath.Contains(neighborPos))
+    // Helper method for finding randomized paths
+    private SolutionPathInfo FindRandomizedPath(Vector2Int startNode, Vector2Int endNode, Dictionary<Vector2Int, List<int>> originalAllTileOpenings)
+    {
+        // Create random priority tiles to encourage path diversity
+        HashSet<Vector2Int> randomTiles = new HashSet<Vector2Int>();
+        int randomTileCount = Mathf.Max(3, Mathf.Min(10, width * height / 10));
+        
+        for (int i = 0; i < randomTileCount; i++)
+        {
+            int x = Random.Range(0, width);
+            int y = Random.Range(0, height);
+            Vector2Int randomPos = new Vector2Int(x, y);
+            
+            if (randomPos != startNode && randomPos != endNode && 
+                originalAllTileOpenings.ContainsKey(randomPos) && 
+                originalAllTileOpenings[randomPos].Count > 0)
+            {
+                randomTiles.Add(randomPos);
+            }
+        }
+        
+        return FindBiasedPath(startNode, endNode, originalAllTileOpenings, randomTiles);
+    }
+
+    // Helper method to find paths biased toward certain tiles
+    private SolutionPathInfo FindBiasedPath(Vector2Int startNode, Vector2Int endNode, 
+        Dictionary<Vector2Int, List<int>> originalAllTileOpenings, 
+        HashSet<Vector2Int> priorityTiles)
+    {
+        // For now, we'll use our existing path finding but could implement a more tailored version
+        // specifically for this biased search in the future
+        
+        SolutionPathInfo path = TryToFindOneSolutionPathRecursive(
+            originalAllTileOpenings, 
+            startNode, 
+            endNode, 
+            new HashSet<Vector2Int>(), 
+            0, 
+            new List<Vector2Int>(), 
+            new Dictionary<Vector2Int, int>()
+        );
+        
+        // If we found a path, we'll randomly rotate some of the tiles 
+        // to create more diversity in our paths
+        if (path != null && path.Rotations != null && path.Rotations.Count > 0)
+        {
+            Dictionary<Vector2Int, int> modifiedRotations = new Dictionary<Vector2Int, int>(path.Rotations);
+            
+            foreach (var pos in path.PathPositions)
+            {
+                // Skip start and end
+                if (pos == startNode || pos == endNode) continue;
+                
+                // Skip priority tiles since we want to focus on them
+                if (priorityTiles.Contains(pos)) continue;
+                
+                // 20% chance to try a different rotation for tiles not on the start-end path
+                if (Random.value < 0.2f && modifiedRotations.ContainsKey(pos))
+                {
+                    List<int> validRotations = GetValidRotationsForTile(pos, path, originalAllTileOpenings);
+                    if (validRotations.Count > 1)
                     {
-                        if (!originalTileOpenings.TryGetValue(neighborPos, out List<int> neighborTileOriginalOpenDirs) || neighborTileOriginalOpenDirs == null)
+                        // Remove current rotation
+                        validRotations.Remove(modifiedRotations[pos]);
+                        
+                        if (validRotations.Count > 0)
                         {
-                            continue; // Should not happen if grid fully mapped, but safety check
-                        }
-
-                        // Allow connection to end tile even if it has no "openings" by its prefab definition (it just needs to be reached)
-                        // For other tiles, they must have openings to be part of a path.
-                        if (neighborPos != endPos && neighborTileOriginalOpenDirs.Count == 0)
-                        {
-                            continue; // Neighbor is an empty non-end tile
-                        }
-
-                        int requiredDirFromNeighborToAccept = GetOppositeDirection(directionToNeighbor);
-
-                        // Check if neighbor can connect (end tile always can, others need CanTileConnectInDirection)
-                        if (neighborPos == endPos || CanTileConnectInDirection(neighborTileOriginalOpenDirs, requiredDirFromNeighborToAccept))
-                        {
-                            FindAllSolutionPathsRecursive(
-                                originalTileOpenings,
-                                neighborPos,
-                                endPos,
-                                visitedInCurrentPath,
-                                allFoundPaths,
-                                requiredDirFromNeighborToAccept,
-                                currentAccumulatedPath,
-                                currentAccumulatedRotations
-                            );
+                            // Choose a different valid rotation
+                            modifiedRotations[pos] = validRotations[Random.Range(0, validRotations.Count)];
                         }
                     }
                 }
             }
-            // Backtrack the rotation for currentPos before trying the next rotation for currentPos, or finishing currentPos exploration
-            currentAccumulatedRotations.Remove(currentPos);
+            
+            return new SolutionPathInfo(path.PathPositions, modifiedRotations);
         }
+        
+        return path;
+    }
 
-        // Backtrack from currentPos after all its rotations and subsequent paths have been explored
-        visitedInCurrentPath.Remove(currentPos);
-        currentAccumulatedPath.RemoveAt(currentAccumulatedPath.Count - 1);
+    // Get all valid rotations for a tile that maintain the path connectivity
+    private List<int> GetValidRotationsForTile(Vector2Int tilePos, SolutionPathInfo currentPath, 
+        Dictionary<Vector2Int, List<int>> originalAllTileOpenings)
+    {
+        List<int> validRotations = new List<int>();
+        
+        // Get the original openings for this tile
+        if (!originalAllTileOpenings.TryGetValue(tilePos, out List<int> tileOriginalOpenDirs) || 
+            tileOriginalOpenDirs == null || tileOriginalOpenDirs.Count == 0)
+        {
+            return validRotations; // No valid rotations for empty tiles
+        }
+        
+        // Find neighboring tiles in the path
+        List<int> requiredConnections = new List<int>();
+        Vector2Int[] worldDirections = { Vector2Int.up, Vector2Int.right, Vector2Int.down, Vector2Int.left };
+        int[] directionValues = { 1, 2, 3, 4 }; // N, E, S, W
+        
+        for (int i = 0; i < 4; i++)
+        {
+            Vector2Int neighborPos = tilePos + worldDirections[i];
+            if (currentPath.PathPositions.Contains(neighborPos))
+            {
+                // This neighbor is part of the path, we need to maintain connectivity
+                requiredConnections.Add(directionValues[i]);
+            }
+        }
+        
+        // Check each rotation to see if it satisfies all required connections
+        for (int rot = 0; rot < 4; rot++)
+        {
+            List<int> rotatedOpenings = new List<int>();
+            foreach (int dir in tileOriginalOpenDirs)
+            {
+                rotatedOpenings.Add(((dir - 1 + rot) % 4) + 1);
+            }
+            
+            bool validForAllConnections = true;
+            foreach (int requiredDir in requiredConnections)
+            {
+                if (!rotatedOpenings.Contains(requiredDir))
+                {
+                    validForAllConnections = false;
+                    break;
+                }
+            }
+            
+            if (validForAllConnections)
+            {
+                validRotations.Add(rot);
+            }
+        }
+        
+        return validRotations;
+    }
+
+    // Helper to check if two paths are functionally equivalent
+    private bool PathsAreEqual(SolutionPathInfo path1, SolutionPathInfo path2)
+    {
+        if (path1 == null || path2 == null) return path1 == path2;
+        
+        // Different number of positions means different paths
+        if (path1.PathPositions.Count != path2.PathPositions.Count) return false;
+        
+        // Check if the paths contain the same positions
+        for (int i = 0; i < path1.PathPositions.Count; i++)
+        {
+            if (!path2.PathPositions.Contains(path1.PathPositions[i]))
+                return false;
+        }
+        
+        // Check if the significant rotations are the same
+        foreach (var pos in path1.PathPositions)
+        {
+            bool path1HasRot = path1.Rotations.TryGetValue(pos, out int rot1);
+            bool path2HasRot = path2.Rotations.TryGetValue(pos, out int rot2);
+            
+            if (path1HasRot != path2HasRot) return false;
+            if (path1HasRot && path2HasRot && rot1 != rot2) return false;
+        }
+        
+        return true;
     }
 
     // This is the old ExploreFillFromPath, which will be refactored to use the iterative lookahead approach.
-    private int ExploreFillFromPath(SolutionPathInfo currentPath, Dictionary<Vector2Int, List<int>> originalAllTileOpenings)
+    private int ExploreFillFromPath(SolutionPathInfo currentPath, Dictionary<Vector2Int, List<int>> originalAllTileOpenings,
+        HashSet<Vector2Int> outFilledTiles = null, Dictionary<Vector2Int, int> outFinalRotations = null)
     {
         if (currentPath == null || currentPath.PathPositions == null || currentPath.PathPositions.Count == 0)
         {
             Debug.LogWarning("[ExploreFillPath] Received null or empty currentPath.");
             return 0;
-        }
-
-        Debug.Log($"[ExploreFillPath] Exploring fill for S-E path with {currentPath.PathPositions.Count} tiles. Path Rotations: {currentPath.Rotations.Count}");
-        foreach(var tilePosInPath in currentPath.PathPositions) 
-        {
-            string rotInfo = currentPath.Rotations.TryGetValue(tilePosInPath, out int r) ? r.ToString() : "N/A (end or unrecorded start)";
-            //Debug.Log($"[ExploreFillPath] Main S-E Path Tile: {tilePosInPath}, Initial Rotation: {rotInfo}"); // Optional: can be noisy
         }
 
         HashSet<Vector2Int> filledTiles = new HashSet<Vector2Int>(currentPath.PathPositions);
@@ -3288,7 +3483,7 @@ private Quaternion CalculateTileRotation(GameObject prefab, List<int> desiredDir
         Queue<Vector2Int> frontier = new Queue<Vector2Int>();
         foreach (var pos in currentPath.PathPositions) // Prime frontier with all tiles from the given S-E path
         {
-            if (currentFixedRotations.ContainsKey(pos) || pos == startPos) // Ensure tile has a rotation or is startPos (which will get one)
+            if (currentFixedRotations.ContainsKey(pos) || pos == startPos) // Ensure tile has a rotation or is startPos
             {
                  frontier.Enqueue(pos);
             }
@@ -3350,18 +3545,444 @@ private Quaternion CalculateTileRotation(GameObject prefab, List<int> desiredDir
                             filledTiles.Add(neighborPos);
                             frontier.Enqueue(neighborPos);
                             currentFixedRotations[neighborPos] = neighborRotationVal;
-                            // Debug.Log($"[ExploreFillPath] ADDED Branch: {neighborPos} (rot: {neighborRotationVal}) TO: {activeTilePos} (rot: {activeTileCurrentRotation}) VIA: {outgoingDirectionFromActive}");
                             break; 
                         }
                     }
                 }
             }
         }
+        
         if (iterations >= (width*height*5)) {
             Debug.LogWarning("[ExploreFillPath] Exceeded iteration limit.");
         }
-        // Debug.Log($"[ExploreFillPath] Fill count for this S-E path: {filledTiles.Count}. Iterations: {iterations}");
+        
+        // Copy results to output parameters if provided
+        if (outFilledTiles != null)
+        {
+            outFilledTiles.Clear();
+            foreach (var pos in filledTiles)
+            {
+                outFilledTiles.Add(pos);
+            }
+        }
+        
+        if (outFinalRotations != null)
+        {
+            outFinalRotations.Clear();
+            foreach (var entry in currentFixedRotations)
+            {
+                outFinalRotations[entry.Key] = entry.Value;
+            }
+        }
+        
         return filledTiles.Count;
+    }
+
+    // Iteratively improve the fill from an initial solution by trying alternative rotations
+    private int ImprovePathFill(HashSet<Vector2Int> initialFilledTiles, Dictionary<Vector2Int, int> initialRotations, 
+        Dictionary<Vector2Int, List<int>> originalAllTileOpenings)
+    {
+        // Make copies to work with
+        HashSet<Vector2Int> currentFilledTiles = new HashSet<Vector2Int>(initialFilledTiles);
+        Dictionary<Vector2Int, int> currentRotations = new Dictionary<Vector2Int, int>(initialRotations);
+        
+        // Set up constants
+        Vector2Int[] worldDirections = { Vector2Int.up, Vector2Int.right, Vector2Int.down, Vector2Int.left }; 
+        int[] directionValues = { 1, 2, 3, 4 }; // N, E, S, W
+        
+        // Track whether any improvements were found in the current pass
+        bool improved = true;
+        int passCount = 0;
+        int maxPasses = 5; // Limit the number of improvement passes
+        
+        // Keep trying until no more improvements or max passes reached
+        while (improved && passCount < maxPasses)
+        {
+            improved = false;
+            passCount++;
+            
+            // For each tile that is currently filled...
+            foreach (var tilePos in new List<Vector2Int>(currentFilledTiles))
+            {
+                // Skip start and end tiles - they have fixed positions
+                if (tilePos == startPos || tilePos == endPos) continue;
+                
+                // Get original openings
+                if (!originalAllTileOpenings.TryGetValue(tilePos, out List<int> tileOriginalOpenDirs) || 
+                    tileOriginalOpenDirs == null || tileOriginalOpenDirs.Count == 0)
+                {
+                    continue; // Skip tiles with no openings
+                }
+                
+                // Store current rotation
+                int currentRotation = currentRotations.ContainsKey(tilePos) ? currentRotations[tilePos] : 0;
+                
+                // Find all unfilled neighbors that could potentially connect
+                List<Vector2Int> potentialNewNeighbors = new List<Vector2Int>();
+                
+                for (int i = 0; i < 4; i++)
+                {
+                    Vector2Int neighborPos = tilePos + worldDirections[i];
+                    
+                    // Only consider unfilled tiles within bounds
+                    if (!InBounds(neighborPos) || currentFilledTiles.Contains(neighborPos))
+                        continue;
+                    
+                    // Check if neighbor has any openings
+                    if (!originalAllTileOpenings.TryGetValue(neighborPos, out List<int> neighborOpenDirs) || 
+                        neighborOpenDirs == null || neighborOpenDirs.Count == 0)
+                        continue;
+                    
+                    // This is a potential neighbor to connect to
+                    potentialNewNeighbors.Add(neighborPos);
+                }
+                
+                // If no potential new neighbors, skip this tile
+                if (potentialNewNeighbors.Count == 0) continue;
+                
+                // Try different rotations to see if we can connect to more neighbors
+                int bestRotation = currentRotation;
+                int maxNewConnections = 0;
+                
+                for (int rot = 0; rot < 4; rot++)
+                {
+                    // Skip the current rotation
+                    if (rot == currentRotation) continue;
+                    
+                    // Get rotated openings for this rotation
+                    List<int> rotatedOpenings = new List<int>();
+                    foreach (int dir in tileOriginalOpenDirs)
+                    {
+                        rotatedOpenings.Add(((dir - 1 + rot) % 4) + 1);
+                    }
+                    
+                    // Check if this rotation maintains all current connections
+                    bool maintainsCurrentConnections = true;
+                    foreach (var neighbor in worldDirections.Select((dir, index) => tilePos + dir)
+                                                           .Where(n => InBounds(n) && currentFilledTiles.Contains(n)))
+                    {
+                        // Direction to this neighbor
+                        int dirToNeighbor = directionValues[Array.IndexOf(worldDirections, neighbor - tilePos)];
+                        
+                        // Check if our new rotation has an opening in this direction
+                        if (!rotatedOpenings.Contains(dirToNeighbor))
+                        {
+                            maintainsCurrentConnections = false;
+                            break;
+                        }
+                        
+                        // Check if neighbor can connect back
+                        if (!currentRotations.TryGetValue(neighbor, out int neighborRot))
+                            continue;
+                        
+                        List<int> neighborOriginalDirs = originalAllTileOpenings[neighbor];
+                        List<int> neighborRotatedDirs = new List<int>();
+                        foreach (int dir in neighborOriginalDirs)
+                        {
+                            neighborRotatedDirs.Add(((dir - 1 + neighborRot) % 4) + 1);
+                        }
+                        
+                        int requiredDir = GetOppositeDirection(dirToNeighbor);
+                        if (!neighborRotatedDirs.Contains(requiredDir))
+                        {
+                            maintainsCurrentConnections = false;
+                            break;
+                        }
+                    }
+                    
+                    // If this rotation doesn't maintain all current connections, skip it
+                    if (!maintainsCurrentConnections) continue;
+                    
+                    // Count new connections possible with this rotation
+                    int newConnections = 0;
+                    foreach (var neighborPos in potentialNewNeighbors)
+                    {
+                        // Direction to this potential neighbor
+                        int dirToNeighbor = directionValues[Array.IndexOf(worldDirections, neighborPos - tilePos)];
+                        
+                        // Check if our new rotation has an opening in this direction
+                        if (!rotatedOpenings.Contains(dirToNeighbor))
+                            continue;
+                        
+                        // Check if neighbor can connect back with SOME rotation
+                        int requiredDirFromNeighbor = GetOppositeDirection(dirToNeighbor);
+                        List<int> neighborOriginalDirs = originalAllTileOpenings[neighborPos];
+                        
+                        if (CanTileConnectInDirection(neighborOriginalDirs, requiredDirFromNeighbor))
+                        {
+                            newConnections++;
+                        }
+                    }
+                    
+                    // If this rotation results in more new connections, remember it
+                    if (newConnections > maxNewConnections)
+                    {
+                        maxNewConnections = newConnections;
+                        bestRotation = rot;
+                    }
+                }
+                
+                // Apply the best rotation if it's different and resulted in new connections
+                if (bestRotation != currentRotation && maxNewConnections > 0)
+                {
+                    currentRotations[tilePos] = bestRotation;
+                    improved = true;
+                    
+                    // Now update the fill based on this new rotation
+                    // This is a simplified version of the fill algorithm for just the updated tile
+                    List<int> newRotatedDirs = new List<int>();
+                    foreach (int dir in tileOriginalOpenDirs)
+                    {
+                        newRotatedDirs.Add(((dir - 1 + bestRotation) % 4) + 1);
+                    }
+                    
+                    foreach (int dirIdx in Enumerable.Range(0, 4))
+                    {
+                        int dir = directionValues[dirIdx];
+                        if (!newRotatedDirs.Contains(dir)) continue;
+                        
+                        Vector2Int neighborPos = tilePos + worldDirections[dirIdx];
+                        if (!InBounds(neighborPos) || currentFilledTiles.Contains(neighborPos)) continue;
+                        
+                        if (!originalAllTileOpenings.TryGetValue(neighborPos, out List<int> neighborDirs) || 
+                            neighborDirs == null || neighborDirs.Count == 0) continue;
+                        
+                        int requiredDir = GetOppositeDirection(dir);
+                        
+                        // Find a valid rotation for the neighbor
+                        for (int rot = 0; rot < 4; rot++)
+                        {
+                            List<int> neighborRotatedDirs = new List<int>();
+                            foreach (int neighborDir in neighborDirs)
+                            {
+                                neighborRotatedDirs.Add(((neighborDir - 1 + rot) % 4) + 1);
+                            }
+                            
+                            if (neighborRotatedDirs.Contains(requiredDir))
+                            {
+                                // Found a valid rotation
+                                currentFilledTiles.Add(neighborPos);
+                                currentRotations[neighborPos] = rot;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Check for newly accessible tiles from the entire current fill
+            if (improved)
+            {
+                // This performs a full fill from scratch using the updated rotations
+                HashSet<Vector2Int> newFill = new HashSet<Vector2Int>();
+                SimulateFill(currentRotations, originalAllTileOpenings, newFill);
+                
+                // Update current filled tiles
+                currentFilledTiles = newFill;
+            }
+            
+            Debug.Log($"[ImprovePathFill] Pass {passCount}: Filled tiles = {currentFilledTiles.Count}, improved = {improved}");
+        }
+        
+        // Update the provided collections with our improved results
+        initialFilledTiles.Clear();
+        foreach (var pos in currentFilledTiles)
+        {
+            initialFilledTiles.Add(pos);
+        }
+        
+        initialRotations.Clear();
+        foreach (var entry in currentRotations)
+        {
+            initialRotations[entry.Key] = entry.Value;
+        }
+        
+        return currentFilledTiles.Count;
+    }
+
+    // Simulate fill from a specific set of rotations
+    private void SimulateFill(Dictionary<Vector2Int, int> fixedRotations, 
+        Dictionary<Vector2Int, List<int>> originalAllTileOpenings,
+        HashSet<Vector2Int> outFilledTiles)
+    {
+        outFilledTiles.Clear();
+        
+        // Queue for BFS
+        Queue<Vector2Int> frontier = new Queue<Vector2Int>();
+        
+        // Start from start position
+        outFilledTiles.Add(startPos);
+        frontier.Enqueue(startPos);
+        
+        Vector2Int[] worldDirections = { Vector2Int.up, Vector2Int.right, Vector2Int.down, Vector2Int.left }; 
+        int[] actualDirectionValues = { 1, 2, 3, 4 }; 
+        
+        while (frontier.Count > 0)
+        {
+            Vector2Int current = frontier.Dequeue();
+            
+            // Get current tile's rotation
+            if (!fixedRotations.TryGetValue(current, out int currentRotation))
+            {
+                if (current == startPos)
+                {
+                    // Default to 0 for start tile if not specified
+                    currentRotation = 0;
+                }
+                else
+                {
+                    continue; // Skip tiles without specified rotation
+                }
+            }
+            
+            // Get original and rotated openings
+            if (!originalAllTileOpenings.TryGetValue(current, out List<int> originalDirs) || 
+                originalDirs == null || originalDirs.Count == 0)
+            {
+                continue; // Skip empty tiles
+            }
+            
+            List<int> rotatedDirs = new List<int>();
+            foreach (int dir in originalDirs)
+            {
+                rotatedDirs.Add(((dir - 1 + currentRotation) % 4) + 1);
+            }
+            
+            // Check all four neighbors
+            for (int i = 0; i < 4; i++)
+            {
+                int dir = actualDirectionValues[i];
+                if (!rotatedDirs.Contains(dir)) continue; // No opening in this direction
+                
+                Vector2Int neighbor = current + worldDirections[i];
+                if (!InBounds(neighbor) || outFilledTiles.Contains(neighbor)) continue;
+                
+                // Check if neighbor can connect back
+                if (!originalAllTileOpenings.TryGetValue(neighbor, out List<int> neighborOriginalDirs) || 
+                    neighborOriginalDirs == null || neighborOriginalDirs.Count == 0)
+                {
+                    continue; // Neighbor is empty
+                }
+                
+                int requiredDir = GetOppositeDirection(dir);
+                
+                // Check if neighbor has a fixed rotation
+                if (fixedRotations.TryGetValue(neighbor, out int neighborRot))
+                {
+                    // Check if neighbor's fixed rotation connects back
+                    List<int> neighborRotatedDirs = new List<int>();
+                    foreach (int neighborDir in neighborOriginalDirs)
+                    {
+                        neighborRotatedDirs.Add(((neighborDir - 1 + neighborRot) % 4) + 1);
+                    }
+                    
+                    if (neighborRotatedDirs.Contains(requiredDir))
+                    {
+                        // Connected!
+                        outFilledTiles.Add(neighbor);
+                        frontier.Enqueue(neighbor);
+                    }
+                }
+                else
+                {
+                    // Neighbor doesn't have a fixed rotation yet
+                    // Check if ANY rotation would work
+                    if (CanTileConnectInDirection(neighborOriginalDirs, requiredDir))
+                    {
+                        // Find a valid rotation
+                        for (int rot = 0; rot < 4; rot++)
+                        {
+                            List<int> neighborRotatedDirs = new List<int>();
+                            foreach (int neighborDir in neighborOriginalDirs)
+                            {
+                                neighborRotatedDirs.Add(((neighborDir - 1 + rot) % 4) + 1);
+                            }
+                            
+                            if (neighborRotatedDirs.Contains(requiredDir))
+                            {
+                                // Found a valid rotation
+                                fixedRotations[neighbor] = rot;
+                                outFilledTiles.Add(neighbor);
+                                frontier.Enqueue(neighbor);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Assign weights to tiles for more strategic fill calculation
+    private Dictionary<Vector2Int, float> AssignTileWeights(Dictionary<Vector2Int, List<int>> originalTileOpenings)
+    {
+        Dictionary<Vector2Int, float> tileWeights = new Dictionary<Vector2Int, float>();
+        
+        foreach (var entry in originalTileOpenings)
+        {
+            Vector2Int pos = entry.Key;
+            List<int> dirs = entry.Value;
+            
+            // Skip start and end positions - they're always filled
+            if (pos == startPos || pos == endPos)
+            {
+                tileWeights[pos] = 1.0f;
+                continue;
+            }
+            
+            // Base weight is 1.0
+            float weight = 1.0f;
+            
+            // Tiles with more connection possibilities are worth more
+            if (dirs.Count > 2) weight += 0.25f * (dirs.Count - 2); // +0.25 for each connection beyond 2
+            
+            // Tiles farther from the critical path are worth more (reward exploration)
+            if (criticalPath != null && criticalPath.Count > 0)
+            {
+                float minDistToCriticalPath = float.MaxValue;
+                foreach (var pathPos in criticalPath)
+                {
+                    float dist = Vector2Int.Distance(pos, pathPos);
+                    minDistToCriticalPath = Mathf.Min(minDistToCriticalPath, dist);
+                }
+                
+                // Bonus for distance from critical path (capped)
+                float distanceBonus = Mathf.Min(minDistToCriticalPath * 0.1f, 0.5f);
+                weight += distanceBonus;
+            }
+            
+            // Key tiles are worth more
+            if (keyTilePositions != null && keyTilePositions.Contains(pos))
+            {
+                weight += 1.0f;
+            }
+            
+            // Bonus for tiles at the grid edges
+            if (pos.x == 0 || pos.x == width - 1 || pos.y == 0 || pos.y == height - 1)
+            {
+                weight += 0.3f;
+            }
+            
+            tileWeights[pos] = weight;
+        }
+        
+        return tileWeights;
+    }
+
+    // Calculate weighted fill value based on tile weights
+    private float CalculateWeightedFill(HashSet<Vector2Int> filledTiles, Dictionary<Vector2Int, float> weights)
+    {
+        float totalWeight = 0f;
+        
+        foreach (var pos in filledTiles)
+        {
+            if (weights.ContainsKey(pos))
+                totalWeight += weights[pos];
+            else
+                totalWeight += 1.0f; // Default weight
+        }
+        
+        return totalWeight;
     }
 
 }
